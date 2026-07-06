@@ -1,0 +1,393 @@
+# =============================================================================
+# KHAOS 预设配置 - 保守型 v22.0 (绝对本金保护)
+# =============================================================================
+# 适用: 2000-5000美元账户，极致风险厌恶，任何市场环境下的本金第一原则。
+# 核心: 本金保护绝对优先，极高确定性入场，闪电止损，最小杠杆，极少交易。
+# 合并策略: 覆盖主配置。账户超1万美金自动停用。
+# 维持者: KHAOS Risk Committee | 审查周期: 每季度
+# compatible_with: "config/default.yaml v20.0+"
+# last_reviewed: 2026-07-07
+# config_version: 22.0
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 预设元数据
+# -----------------------------------------------------------------------------
+preset_metadata:
+  name: "Conservative"
+  version: "22.0"
+  target_account_range: "2000-5000 USD"
+  base_currency: USD
+  auto_disable_on_balance_exceed: 10000
+  merge_strategy: override
+  conflict_resolution: warn_and_use_preset
+  switch_cooldown_hours: 24          # 切换至其他预设需冷却24小时
+  maintainer: "KHAOS Risk Committee"
+  review_cycle: quarterly
+  tested_with_dependencies: "requirements.v20.txt"
+
+# -----------------------------------------------------------------------------
+# 底线声明
+# -----------------------------------------------------------------------------
+worst_case_scenario:
+  max_drawdown_lt: "20%"
+  daily_loss_lt: "$150"
+  description: "在极端市场条件下，保守预设旨在将最大回撤控制在20%以内，单日亏损不超过150美元或净值7.5%（取较小值）。"
+
+# -----------------------------------------------------------------------------
+# 量化风险基调
+# -----------------------------------------------------------------------------
+global_risk_profile:
+  risk_tolerance: low
+  max_annualized_volatility: 0.15
+  min_annual_return_target: 0.05
+  max_sharpe: 1.0
+  linked_parameters: [max_leverage, account_risk_per_trade, prob_threshold]
+
+# -----------------------------------------------------------------------------
+# 策略参数覆盖 (绝对保守)
+# -----------------------------------------------------------------------------
+strategy:
+  trend_prob_filter:
+    prob_threshold: 0.75
+    adaptive_bands: false           # 关闭动态带宽，使用固定保守值
+    chaos_half_width: 0.6
+    transition_end: 1.8
+    consecutive_bars: 3
+    gap_exemption: true
+    volume_confirm: true
+    min_expected_profit_cost_ratio: 2.5
+    # 若连续3天无信号，自动通知用户是否降低阈值
+    min_signals_per_day_alert: 0
+
+  escape:
+    thresholds:
+      warn: 0.38
+      danger: 0.58
+    cooldown_bars: 12               # 与全局冷却取较长者
+    dynamic_thresholds: true
+    strong_trend_exemption: false
+    crisis_weight_override:
+      micro: 0.4
+      momentum: 0.2
+      volatility: 0.2
+      sr: 0.1
+      wave: 0.1
+
+  recapture:
+    enabled: true
+    prob_threshold: 0.75            # 略微放宽以匹配小仓位
+    recapture_coeff: 0.3
+    resonance_boost_factor: 0.2
+    max_window_bars: 15
+    false_break_restart: false
+
+  callback_drop:
+    enabled: false
+
+  pullback_add:
+    prob_threshold: 0.75
+    position_coeff: 0.6
+    consolidation_min_bars: 4
+    consolidation_max_bars: 8
+    max_consecutive_adds: 1
+    volume_filter_threshold: 0.8
+    adaptive_volume_threshold: true # 根据时段动态调整
+
+  # 微观模块永不自动启用
+  micro_pullback_scalper:
+    enabled: false
+    auto_enable_on_balance: false
+  micro_divergence_trader:
+    enabled: false
+    auto_enable_on_balance: false
+
+  range_modules:
+    enabled_all: false
+
+  wave_similarity:
+    min_similarity: 0.6
+
+  resonance:
+    weight: 0.3
+    max_boost: 1.2
+    max_position_change_ratio: 0.1
+
+  adaptive_sr:
+    min_sr_distance_atr: 0.4
+    min_touches: 3
+
+  hmm:
+    warmup_bars: 500
+
+  kalman:
+    q_ratio: 0.005
+
+  regime:
+    confirm_bars: 7
+
+# -----------------------------------------------------------------------------
+# 风险参数覆盖 (堡垒级保护)
+# -----------------------------------------------------------------------------
+risk:
+  risk_budget:
+    account_risk_per_trade: 0.005
+    auto_risk_adjust: true
+    min_risk: 0.001
+    min_notional_risk_ratio: 0.002  # 确保名义风险不低于底线
+
+  leverage:
+    max_leverage: 2.0
+    max_total_delta: 2.0
+    max_single_symbol_exposure_pct: 0.3
+    correlation_aware_exposure: true
+
+  loss_limits:
+    max_daily_loss: 0.03
+    dynamic_loss_limit: true
+    dynamic_loss_rule: trailing_7day_avg
+    absolute_daily_loss_usd: 150    # 固定金额保护
+    absolute_loss_ratio: 0.075      # 动态比例保护 (取较小值)
+    max_consecutive_losses: 3
+    cool_down_rules:
+      loss_under_2pct: 60
+      loss_2_5pct: 120
+      loss_above_5pct: 360
+    # 冷却叠加规则: 与escape冷却取较长者
+
+  profit_protection:
+    max_profit_drawdown: 0.35
+    hard_profit_drawdown: 0.55      # 留出缓冲
+    profit_target_alert_pct: 0.10
+
+  volatility_guard:
+    vol_guard_threshold_type: percentile
+    vol_guard_threshold: 0.7
+    vol_guard_reduce_factor: 0.7
+    vol_guard_min_leverage: 1.0
+    min_leverage_after_reduction: 1.2
+    restore_cooldown_hours: 48
+
+  liquidity:
+    max_spread_pct: 0.08
+    extreme_spread_override: 0.12   # 极端行情放宽
+    min_24h_volume_btc: 150
+
+  cost_control:
+    net_risk_reward_ratio: 2.0
+    small_account_rr_override: 1.8
+
+  position_management:
+    max_hold_bars: 200
+    max_hold_bars_auto_scale: true
+    max_consecutive_adds: 1
+    max_open_orders: 3
+    max_pending_stop_orders: 2
+
+  funding_rate_protection:
+    close_bars_before: 4            # 提前4根K线
+    close_pct: 50                   # 仅减仓50%
+
+  connection_risk:
+    loss_timeout_seconds: 45
+    grace_period_sec: 15            # 确认断线前等待
+    on_disconnect: close_positions
+
+  black_swan:
+    detection:
+      single_day_move_pct: 18
+      intraday_peak_to_trough: true
+    stablecoin_depeg:
+      threshold_pct: 0.015
+
+  minimum_equity_usd: 800
+  warning_equity_usd: 1200
+
+  panic_stop:
+    enabled: true
+    max_slippage_per_min: 2.0
+
+  # 强制影子模式验证
+  shadow_required: true
+  min_shadow_days: 7
+
+# -----------------------------------------------------------------------------
+# 执行参数覆盖 (精准保守执行)
+# -----------------------------------------------------------------------------
+execution:
+  global:
+    default_order_type: limit
+    prefer_maker: true
+    fallback_to_taker: true
+    fallback_timeout_sec: 25
+    max_fallback_attempts: 2
+
+  slippage:
+    max_slippage_pct: 0.02
+    per_symbol_slippage: {}         # 可单独覆盖
+
+  order_lifecycle:
+    timeout_sec: 20
+    dynamic_timeout: true
+    max_open_orders: 3
+    max_pending_stop_orders: 2
+    reconciliation_interval_sec: 30
+
+  partial_fill:
+    timeout_sec: 8
+
+  twap:
+    min_order_value_usd: 1000       # 小账户几乎不触发
+
+  iceberg:
+    enabled: false
+
+  fee_optimizer:
+    max_wait_for_maker_sec: 25
+    spread_threshold_for_limit: 0.03
+    price_deviation_cancel: true
+
+  execution_risk:
+    market_order_max_slippage_pct: 0.15
+    circuit_breaker_for_market_orders:
+      enabled: true
+      price_change_pct_1min: 1.5
+    price_sanity_check:
+      enabled: true
+      max_deviation_pct: 8
+    trade_validation:
+      enabled: true
+
+  verify_exchange_limits: true
+
+  offline_stop_protection:
+    enabled: true
+    sync_interval_sec: 25
+
+  duplicate_order_protection:
+    enabled: true
+    window_sec: 15
+
+  rate_limit:
+    max_daily_orders: 5
+
+  qty_rounding: floor
+  price_rounding: floor_for_buy_ceil_for_sell
+
+# -----------------------------------------------------------------------------
+# 数据源 (极致数据质量)
+# -----------------------------------------------------------------------------
+data_sources:
+  data_timeout_sec: 15
+  stability_over_speed: true        # 优先稳定性而非低延迟
+  quality:
+    outlier_price_filter: true
+    mad_threshold: 7.0
+    gap_detection:
+      enabled: true
+      max_gap_atr_mult: 2.5
+  integrity:
+    max_missing_ratio: 0.015
+  clock_sync:
+    max_deviation_sec: 0.8
+
+# -----------------------------------------------------------------------------
+# 存储与备份 (保守加强)
+# -----------------------------------------------------------------------------
+storage:
+  retention:
+    audit_retention_days: 1825
+  backup:
+    interval_hours: 6
+
+# -----------------------------------------------------------------------------
+# 进化模块 (永远关闭)
+# -----------------------------------------------------------------------------
+evolution:
+  global:
+    enabled: false
+  future_enable_policy: require_full_validation
+
+# -----------------------------------------------------------------------------
+# 日志与审计 (极致透明)
+# -----------------------------------------------------------------------------
+logging:
+  audit:
+    log_level: DEBUG
+    immutable_backend: database_chain
+  anomaly_log_level: INFO
+
+audit:
+  enabled: true
+  audit_trail: true
+  integrity:
+    chain_hash: true
+
+# -----------------------------------------------------------------------------
+# 通知 (实时预警)
+# -----------------------------------------------------------------------------
+notifications:
+  drawdown_alert_threshold_pct: 0.03
+  max_alerts_per_day: 10
+
+# -----------------------------------------------------------------------------
+# 监控 (保留但精简)
+# -----------------------------------------------------------------------------
+metrics:
+  enabled: true
+  sampling_rate: 0.05
+
+live_stream:
+  enabled: true
+  local_only: true
+
+# -----------------------------------------------------------------------------
+# 多品种 (单品种)
+# -----------------------------------------------------------------------------
+multi_symbol:
+  max_concurrent_symbols: 1
+  on_multi_symbol: use_first_only
+
+# -----------------------------------------------------------------------------
+# API权限严格限制
+# -----------------------------------------------------------------------------
+api_key_scope_check:
+  enabled: true
+  forbidden_scopes: [withdraw, margin]
+
+# -----------------------------------------------------------------------------
+# 手动干预策略
+# -----------------------------------------------------------------------------
+manual_order_policy:
+  require_confirmation_and_risk_check: true
+  max_manual_order_value_pct_of_equity: 2
+
+# -----------------------------------------------------------------------------
+# 极端事件保护
+# -----------------------------------------------------------------------------
+delisting_protection:
+  on_delisting: immediate_close
+
+event_based_halt:
+  enabled: true
+  event_sources: [exchange_announcement, hard_fork]
+
+maintenance_action: close_positions_and_stop
+
+# -----------------------------------------------------------------------------
+# 绩效基准与测试
+# -----------------------------------------------------------------------------
+benchmark:
+  max_drawdown_lt: 0.15
+  annual_return_gt: 0.05
+  regression_test: required_before_upgrade
+
+# -----------------------------------------------------------------------------
+# 自助恢复
+# -----------------------------------------------------------------------------
+reset_command: "khaos preset disable conservative --confirm"
+offline_mode_require_confirmation: true
+first_run_wizard:
+  conservative_guidance: true
+
+extreme_event_protocol: "see apocalypse config in default.yaml"
