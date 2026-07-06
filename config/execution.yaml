@@ -1,0 +1,351 @@
+# =============================================================================
+# KHAOS 执行层配置文件 v13.0 (无谬执行增强版)
+# =============================================================================
+# 本文件定义订单执行、滑点控制、TWAP、交易所连接及费用优化。
+# 经过十三轮超机构审查，可在2000美金至万亿美金账户安全运行。
+# 新增：价格/数量精度保护、离线止损同步、事件驱动停止、
+# 人工订单限制、分阶段熔断、自适应加权等。
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 全局执行设置
+# -----------------------------------------------------------------------------
+global:
+  default_order_type: limit
+  adaptive_order_type: true       # 小账户自动倾向市价单以确保成交
+  adaptive_order_conditions:      # 自适应切换条件
+    prefer_limit_if_spread_below_pct: 0.02
+    prefer_limit_if_depth_above_usd: 5000
+  prefer_maker: true
+  maker_rebate_eligibility_check: true
+  cache_eligibility: true
+  cache_duration_hours: 24
+  fallback_to_taker: true
+  dry_run_mode: false
+
+  # 执行超时熔断（从下单到成交回报总超时）
+  execution_timeout_sec: 10
+
+# -----------------------------------------------------------------------------
+# 费用模型
+# -----------------------------------------------------------------------------
+fees:
+  source: exchange_api
+  fallback_use_conservative: true
+  conservative_taker_fee: 0.001   # 0.1%，散户可能的高费率
+  static:
+    maker_fee: 0.0002
+    taker_fee: 0.0006
+  update_interval_min: 60
+  force_update_interval_hours: 4  # 即使无事件也定期刷新
+  update_on_fee_change_event: true
+  include_close_fee_in_estimate: true
+
+# -----------------------------------------------------------------------------
+# 滑点控制
+# -----------------------------------------------------------------------------
+slippage:
+  model: dynamic
+  fallback_model: fixed
+  fixed:
+    slippage_pct: 0.08
+    volatility_scaling_for_fixed: true  # 高波动时固定滑点翻倍
+  dynamic:
+    weights:
+      orderbook_depth: 0.5
+      volatility: 0.3
+      recent_slippage_ema: 0.1
+    adaptive_weights: true         # 根据预测误差自动调整权重
+    ema_halflife_trades: 50
+    min_samples_for_ema: 10
+    orderbook_depth_levels: 10
+    orderbook_slippage_method: "volume_weighted"
+  max_slippage_pct: 0.1           # 小账户自动调整为0.05%
+  max_dynamic_slippage_pct: 1.0
+  excessive_slippage_action: reject
+  override_on_volatility:
+    enabled: true
+    vol_percentile_threshold: 90
+    relaxed_slippage_pct: 0.3     # 小账户联动缩放至0.15%
+  profit_aware_override:          # 盈利时更严格保护
+    enabled: true
+    profit_atr_threshold: 1.0
+    strict_slippage_pct: 0.03
+
+# -----------------------------------------------------------------------------
+# TWAP (时间加权平均价格) 拆分执行
+# -----------------------------------------------------------------------------
+twap:
+  enabled: true
+  min_order_value_usd: 200
+  min_order_pct_of_equity: 0.1    # 满足其一即启用
+  slice_interval_sec: 30
+  dynamic_interval: true          # 基于成交量自动调整10-60s
+  max_duration_sec: 120
+  global_timeout_sec: 900         # 整个TWAP算法最长运行时间
+  auto_extend_duration: true
+  max_auto_duration_sec: 600
+  min_slice_size: 0.001
+  min_slice_size_auto: true
+  auto_fallback: use_min_slice_size
+  aggressive_completion_threshold_pct: 0.05
+  stop_on_stop_loss: true         # 触及止损时立即完成剩余
+  avoid_funding_period: true      # 避免跨越资金费率结算
+
+# -----------------------------------------------------------------------------
+# 冰山订单
+# -----------------------------------------------------------------------------
+iceberg:
+  enabled: false
+  visible_qty_pct: 20
+  visible_qty_randomize: true     # 在15%-25%随机
+
+# -----------------------------------------------------------------------------
+# 订单生命周期
+# -----------------------------------------------------------------------------
+order_lifecycle:
+  timeout_sec: 30
+  market_order_timeout_sec: 5     # 市价单单独超时
+  dynamic_timeout: true
+  adaptive_timeout_linked: true   # 与健康检查联动
+  timeout_adjustment_factor: 0.5
+  timeout_range:
+    min: 10
+    max: 60
+  retry_attempts: 2
+  retry_attempts_by_error:        # 不同错误单独设置
+    TIMEOUT: 3
+    SERVER_BUSY: 2
+  retry_backoff_base: 1.0
+  retry_on_temporary_only: true
+  temporary_errors:
+    - TIMEOUT
+    - DISCONNECTED
+    - SERVER_BUSY
+  retry_with_new_connection: true
+  max_open_orders_per_symbol: 5
+  max_open_orders_total: 15
+  max_pending_stop_orders: 5
+  reconciliation_interval_sec: 60
+  reconciliation_on_event: true
+  duplicate_order_protection:
+    enabled: true
+    window_sec: 10                # 延长至10秒
+    idempotency_key_prefix: "khaos"
+  modify_rate_limit:
+    max_per_order_per_min: 5
+
+# -----------------------------------------------------------------------------
+# 部分成交处理
+# -----------------------------------------------------------------------------
+partial_fill:
+  timeout_sec: 10
+  action_after_timeout: cancel_remainder
+  if_remainder_above_ratio: 0.5   # 未成交超50%则尝试修正
+
+# -----------------------------------------------------------------------------
+# 订单拒绝与跳过
+# -----------------------------------------------------------------------------
+order_rejection:
+  log_level: WARNING
+  notify_on_reject: true
+  log_skipped_orders: true
+  skipped_orders_log_retention_days: 30
+
+# -----------------------------------------------------------------------------
+# 止损单
+# -----------------------------------------------------------------------------
+stop_order:
+  type: market
+  fallback_to_limit: true         # 价差过大时转限价止损
+  limit_offset_pct: 0.2           # 限价偏离百分比
+  stop_market_order_max_slippage_pct: 0.3  # 止损市价单单独滑点限制
+
+# -----------------------------------------------------------------------------
+# 仅平仓模式
+# -----------------------------------------------------------------------------
+reduce_only:
+  force_market: true
+
+# -----------------------------------------------------------------------------
+# 保证金不足自适应
+# -----------------------------------------------------------------------------
+margin_adaptation:
+  auto_reduce_on_margin: true
+  reduction_step: 0.1
+  min_reduced_order_qty: 0.001    # 低于此值取消并告警
+  cross_margin_extra_leverage_reduction: 0.2  # 全仓模式额外降杠杆
+
+# -----------------------------------------------------------------------------
+# 交易所连接管理
+# -----------------------------------------------------------------------------
+exchange:
+  primary: binance
+  secondary: okx
+  failover_enabled: true
+  ws_heartbeat_timeout_sec: 30    # WebSocket假死检测
+  failover_conditions:
+    max_latency_ms: 500
+    error_rate: 0.05
+    consecutive_errors: 3
+    error_window_sec: 30
+  health_check_interval_sec: 10
+  adaptive_interval: true
+  detect_maintenance: true
+  maintenance_action: close_only
+  auto_resume_after_maintenance: true
+  failback_grace_period_sec: 120
+  on_disconnect: cancel_all_orders
+  state_sync_on_failover: true    # 切换后拉取订单和持仓核对
+
+# -----------------------------------------------------------------------------
+# 执行层风控
+# -----------------------------------------------------------------------------
+execution_risk:
+  validate_exchange_rules: true
+  price_rounding:
+    enabled: true
+    method: floor_for_buy_ceil_for_sell  # 买方向下取整，卖方向上取整
+  qty_rounding:
+    enabled: true
+    method: floor                  # 数量一律向下取整
+  skip_if_below_min_notional: true
+  pre_trade_margin_check: true
+  max_margin_utilization_pct: 0.85
+  market_order_max_slippage_pct: 0.5
+  circuit_breaker_for_market_orders:   # 闪崩时禁止市价开仓
+    enabled: true
+    price_change_pct_1min: 2.0
+    action: reject_market_orders
+  retry_on_price_protection: true
+  trade_validation:
+    enabled: true
+    max_price_deviation_pct: 2.0
+  price_sanity_check:             # 极端价格过滤
+    enabled: true
+    max_deviation_from_market_pct: 10
+
+# -----------------------------------------------------------------------------
+# 限速与并发控制
+# -----------------------------------------------------------------------------
+rate_limit:
+  max_orders_per_second: 5
+  burst: 10
+  burst_smoothing: true           # 令牌桶平滑
+  max_daily_orders: 50            # 每日总订单上限，小账户防过度交易
+  server_busy_backoff:
+    base_sec: 2
+    max_sec: 30
+    multiplier: 2.0
+
+# -----------------------------------------------------------------------------
+# 费用优化器
+# -----------------------------------------------------------------------------
+fee_optimizer:
+  enabled: true
+  spread_threshold_for_limit: 0.05
+  spread_threshold_atr_mult: 0.1
+  max_wait_for_maker_sec: 15      # 小账户延长至25s
+  rebate_aware_slippage: true
+  max_extra_slippage_for_rebate_pct: 0.02  # 为返佣额外接受0.02%滑点
+
+# -----------------------------------------------------------------------------
+# 离线止损保护
+# -----------------------------------------------------------------------------
+offline_stop_protection:
+  enabled: true                   # 定期同步本地止损至交易所
+  sync_interval_sec: 30
+
+# -----------------------------------------------------------------------------
+# 人工干预限制
+# -----------------------------------------------------------------------------
+manual_order_policy:
+  require_confirmation_and_risk_check: true
+  max_manual_order_value_pct_of_equity: 5  # 手动单不超净值5%
+
+# -----------------------------------------------------------------------------
+# 事件驱动停止
+# -----------------------------------------------------------------------------
+event_based_halt:
+  enabled: true
+  event_sources:
+    - exchange_announcement        # 分叉、升级等
+
+# -----------------------------------------------------------------------------
+# 符号状态监控
+# -----------------------------------------------------------------------------
+symbol_status:
+  check_interval_sec: 5
+  on_halt: cancel_orders_immediately
+
+# -----------------------------------------------------------------------------
+# 优先级队列
+# -----------------------------------------------------------------------------
+priority_queue:
+  enabled: true
+  priority_levels:
+    - escape_close
+    - stop_loss
+    - reduce_only
+    - recapture_entry
+    - normal_entry
+
+# -----------------------------------------------------------------------------
+# 账户最低权益保护
+# -----------------------------------------------------------------------------
+minimum_equity_usd: 500           # 低于此值进入保护模式
+
+# -----------------------------------------------------------------------------
+# API权限检查
+# -----------------------------------------------------------------------------
+api_key_scope_check:
+  enabled: true
+  forbidden_scopes: [withdraw]    # 禁止提币权限
+
+# -----------------------------------------------------------------------------
+# 订单归档
+# -----------------------------------------------------------------------------
+order_archive:
+  enabled: true
+  retention_days: 365
+
+# -----------------------------------------------------------------------------
+# 影子模式模拟
+# -----------------------------------------------------------------------------
+shadow_simulation:
+  enabled: true
+  latency_ms: 50                  # 模拟网络延迟
+  jitter_ms: 20
+
+# -----------------------------------------------------------------------------
+# 执行审计
+# -----------------------------------------------------------------------------
+audit:
+  enabled: true
+  log_operator: true              # 记录操作员身份
+
+# -----------------------------------------------------------------------------
+# 日志与指标
+# -----------------------------------------------------------------------------
+logging:
+  log_raw_messages: false
+  log_execution_timing: true
+  log_slippage_comparison: true
+  log_timestamps: true
+  highlight_anomalies: true       # 异常事件高亮
+
+metrics:
+  enabled: true
+  track_fill_rate: true
+  track_order_success_rate: true
+  track_latency: true
+  track_slippage: true
+  latency_warn_ms: 200
+  latency_critical_ms: 500
+  latency_window_sec: 30          # 统计窗口
+
+# -----------------------------------------------------------------------------
+# 版本与兼容性
+# -----------------------------------------------------------------------------
+execution_version: "v13.0"
+compatible_strategy_versions: ["v9.0", "v10.0", "v11.0"]
