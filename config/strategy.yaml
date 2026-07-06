@@ -1,0 +1,445 @@
+# =============================================================================
+# KHAOS 策略参数配置文件 v10.0 (钻石级防御)
+# =============================================================================
+# 本文件经过十轮超机构审查，专为2000美金至万亿美金账户设计。
+# 所有参数均具备自适应边界、冲突消解和极端场景韧性。
+# 修改本文件后需通过影子账户验证，并由双人复核生效。
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 账户规模自适应（核心防护层）
+# -----------------------------------------------------------------------------
+account_adaptation:
+  enabled: true
+  auto_scale: true
+  reference_balance: 50000
+  scaling_method: sqrt             # sqrt(净值/参考值)
+  min_scale_factor: 0.3
+  max_scale_factor: 1.0
+  post_scale_min_qty_enforcement: true  # 缩放后仓位低于最小单位时自动调整
+  log_skipped_trades: true         # 记录因资金不足跳过的交易
+
+  small_account_enhancements:      # 净值 < $3000 时触发
+    enabled: true
+    override_priority: small_account_wins  # 与主参数冲突时取更保守值
+    escape_threshold_shift: 0.05
+    resonance_weight_override: 0.3
+    consecutive_bars_override: 3
+    cooldown_bars_escape: 6
+    cooldown_bars_recapture: 8
+    min_recapture_size_btc: 0.0005
+    min_volatility_atr_scale: 0.7
+    pullback_coeff_floor: 0.5
+    callback_coeff_floor: 0.2
+    max_daily_trades_override: 10
+    profit_target_pct_alert: 15
+    max_spread_pct_override: 0.15
+    max_acceptable_slippage_override: 0.05
+    stop_tight_atr_callback_override: 0.25
+    pullback_failure_cooldown_min: 30
+    wave_similarity_min_override: 0.5
+
+# -----------------------------------------------------------------------------
+# 交易品种与周期
+# -----------------------------------------------------------------------------
+symbols:
+  - BTCUSDT
+primary_interval: "3m"
+secondary_intervals:
+  - "5m"
+  - "15m"
+
+multi_symbol:
+  enabled: false
+  max_concurrent_symbols: 3
+  risk_budget_allocation_pct: 0.5
+  # 若实际品种数<2，自动将预算提升至1.0
+  auto_expand_single: true
+
+symbols_config:
+  BTCUSDT:
+    max_leverage_override: 3.0
+    min_volatility_atr: 50
+
+# 交易所规则校验
+verify_exchange_limits: true
+action_on_mismatch: "adjust"       # 自动下调至交易所允许范围
+
+# 仅减仓模式（可通过API切换）
+reduce_only_mode: false
+
+# 断连保护策略
+connection_loss_policy:
+  enabled: true
+  timeout_seconds: 60
+  action: reduce_only              # 断连超过1分钟自动只减仓
+
+# 信号优先级（方向冲突时按序执行）
+signal_priority:
+  - escape_close
+  - escape_reduce
+  - recapture
+  - callback_drop
+  - pullback_add
+
+# 最大连续同向加仓次数
+max_consecutive_adds: 3
+
+# 全局移动止损
+global_trailing_stop:
+  enabled: true
+  activation_profit_atr_mult: 0.5  # 浮盈超过0.5倍ATR时激活
+  max_hold_bars: 300               # 最大持仓K线数，超时减仓
+
+# 最大可接受滑点（策略层）
+max_acceptable_slippage_pct: 0.1   # 将被小账户增强覆盖
+
+# 自我监控（异常信号检测）
+self_monitoring:
+  enabled: true
+  max_signals_per_hour: 20
+  action: pause_trading            # 超限暂停交易1小时
+
+# 低流动性保护
+low_liquidity_protection:
+  enabled: true
+  max_spread_pct: 0.2              # 小账户自动调整为0.15
+  min_24h_volume_btc: 100
+
+# 退市保护
+delisting_protection:
+  enabled: true
+  action: close_and_alert
+  check_interval_hours: 1
+  fallback_action: close_only
+
+# 时间偏差保护
+max_time_deviation:
+  warn_threshold_ms: 500
+  stop_threshold_ms: 2000
+
+# 资金费率保护
+funding_rate_protection:
+  enabled: true
+  close_minutes_before: 15         # 结算前15分钟收紧止损或减仓
+
+# 熔断后行为
+circuit_breaker_behavior: manual_reset  # 熔断后需手动确认恢复
+
+# 检查点间隔
+checkpoint_interval_bars: 100
+
+# -----------------------------------------------------------------------------
+# 多周期层级映射
+# -----------------------------------------------------------------------------
+hierarchy:
+  strict: true
+  enabled: true
+
+# -----------------------------------------------------------------------------
+# 市场状态识别
+# -----------------------------------------------------------------------------
+regime:
+  detector: "MarketRegimeMonitor"
+  confirm_bars: 6
+  hysteresis_bars: 15
+  range_detection:
+    adx_period: 14
+    adx_threshold: 20
+    kma_slope_threshold: 0.01
+    bb_bandwidth_percentile: 20
+
+# -----------------------------------------------------------------------------
+# 自适应卡尔曼均线 (KMA)
+# -----------------------------------------------------------------------------
+kalman:
+  q_ratio: 0.01
+  delta: 1.0e-5
+  adaptive_q: true
+  min_q_ratio: 0.0005
+  max_q_ratio: 0.1
+  q_ratio_jitter: 0.01
+  max_q_jitter: 0.02
+  jitter_decay: 0.99               # 每次使用后衰减，保持长期稳定
+
+# -----------------------------------------------------------------------------
+# HMM 状态检测
+# -----------------------------------------------------------------------------
+hmm:
+  auto_select: true
+  min_states: 2
+  max_states: 5
+  bic_period: 500
+  n_states: 3
+  retrain_interval: 500
+  warmup_bars: 300
+  warmup_bars_auto_scale: true     # 根据主周期自动换算
+  feature_window: 20
+  model_type: "GaussianHMM"
+
+# -----------------------------------------------------------------------------
+# 分层概率过滤器
+# -----------------------------------------------------------------------------
+trend_prob_filter:
+  enabled: true
+  adaptive_bands: true
+  adaptive_bands_config:
+    window: 200
+    low_percentile: 20
+    high_percentile: 80
+    outlier_robust: true
+    ema_halflife: 100
+    low_percentile_min: 15
+  chaos_half_width: 0.5
+  transition_end: 1.5
+  prob_threshold: 0.7
+  require_consecutive_outward: true
+  consecutive_bars: 2
+  allow_direction_switch: true
+  gap_exemption: true
+  gap_penalty_coeff: 0.7
+  max_gap_atr: 3.0                 # 超过3倍ATR跳空直接拒绝
+  volume_confirm: true
+  min_expected_profit_cost_ratio: 2.0  # 预期盈利 = 1.5 ATR，成本 = 手续费*2 + 滑点
+  include_funding_cost: true       # 纳入资金费率预估
+
+# -----------------------------------------------------------------------------
+# 阶段顶逃逸
+# -----------------------------------------------------------------------------
+escape:
+  enabled: true
+  dynamic_thresholds: true
+  threshold_map:
+    # 使用线性插值，斜率0.02~0.8之间平滑过渡
+    slope_low: 0.02
+    slope_high: 0.8
+    warn_base: 0.4
+    danger_base: 0.65
+    warn_slope_scale: 0.15
+    danger_slope_scale: 0.08
+  weights:
+    momentum: 0.3
+    volatility: 0.2
+    micro: 0.2
+    sr: 0.15
+    wave: 0.15
+  crisis_weight_override:
+    vol_percentile: 99
+    min_history_days: 30           # 不足30天数据则禁用覆盖
+    micro_weight_mult: 2.0
+    momentum_weight_mult: 0.5
+  thresholds:
+    warn: 0.4
+    danger: 0.65
+  cooldown_bars: 10
+  strong_trend_exemption: true
+  exemption_prob_source: "primary"
+  exemption_fallback: disable       # HMM不可用时禁用豁免
+
+# -----------------------------------------------------------------------------
+# 波段再捕捉
+# -----------------------------------------------------------------------------
+recapture:
+  enabled: true
+  prob_threshold: 0.65
+  recapture_coeff: 0.6
+  max_window_bars: "auto"
+  window_bars_map:
+    "3m": 30
+    "5m": 20
+    "15m": 12
+  dynamic_window: true
+  dynamic_window_config:
+    atr_percentile_threshold: 70
+    extend_factor: 1.5
+  min_window_atr_mult: 0.5
+  resonance_boost_factor: 0.3      # 仓位 = base * (1 + resonance * 0.3)
+  resonance_penalty_factor: 0.5    # 负共振时仓位 = base * (1 + resonance * 0.5) (resonance负)
+  false_break_restart: true
+  max_restarts: 2
+
+# -----------------------------------------------------------------------------
+# 回调跌落追仓
+# -----------------------------------------------------------------------------
+callback_drop:
+  enabled: true
+  require_escape_trigger: true
+  allow_standalone_if_strong_reversal: true
+  strong_reversal_definition:       # 强反转量化
+    hmm_5m_prob: 0.7
+    bpi_threshold: 0.2
+    takerflow_threshold: 0.1
+  max_bars_after_escape: 30
+  extend_on_low_volatility: true
+  drop_prob_threshold: 0.7
+  position_coeff: 0.5
+  stop_tight_atr: 0.2
+  trail_atr: 0.3
+  lower_band_atr_offset: 0.5
+  prob_weights:
+    price_action: 0.3
+    momentum: 0.3
+    micro: 0.25
+    timeframe: 0.15
+  micro_fallback: true
+  micro_data_required: false
+  cooldown_bars: 10
+
+# -----------------------------------------------------------------------------
+# 均线回踩确认加仓
+# -----------------------------------------------------------------------------
+pullback_add:
+  enabled: true
+  prob_threshold: 0.7
+  position_coeff: 0.8
+  consolidation_min_bars: 3
+  consolidation_max_bars: 8
+  extend_on_weak_trend: true
+  weak_trend_definition:
+    slope_min: 0.01
+    slope_max: 0.03
+    extended_max_bars: 12
+  near_ma_atr: 0.3
+  stop_atr: 0.2
+  trail_atr_mult: 0.8
+  prob_weights:
+    structure: 0.35
+    momentum: 0.30
+    volume_micro: 0.25
+    timeframe: 0.10
+  cooldown_bars: 8
+  failure_cooldown_minutes: 60
+  volume_filter: true
+  volume_filter_threshold: 0.6
+  volume_weight_min_threshold: 0.5  # 成交量低于均量50%时微结构权重减半
+  adaptive_volume_threshold: true
+
+# -----------------------------------------------------------------------------
+# 微折返剥头皮
+# -----------------------------------------------------------------------------
+micro_pullback_scalper:
+  enabled: false
+  min_account_balance: 5000
+  min_trend_slope: 0.05
+  max_retrace_atr: 0.8
+  min_retrace_atr: 0.3
+  position_coeff: 0.3
+  target_atr_mult: 1.5
+  stop_atr: 0.2
+
+# -----------------------------------------------------------------------------
+# 微观背离交易
+# -----------------------------------------------------------------------------
+micro_divergence_trader:
+  enabled: false
+  min_account_balance: 5000
+  rsi_period: 7
+  min_slope_strength: 0.1
+  position_coeff: 0.2
+  target_atr: 0.8
+  stop_atr: 0.2
+
+# -----------------------------------------------------------------------------
+# 震荡行情专用模块
+# -----------------------------------------------------------------------------
+range_modules:
+  enabled_all: false
+  enabled_all_preserve_custom: true
+
+  range_grid:
+    enabled: false
+    min_account_balance: 5000
+    grid_atr_mult: 0.5
+    min_grid_distance_pct: 0.1
+    min_grid_distance_atr_mult: 0.3  # 取大值
+    position_coeff: 0.5
+    upper_buffer: 0.2
+    lower_buffer: 0.2
+    max_hold_bars_grid: 100
+
+  volume_profile_mr:
+    enabled: false
+    min_account_balance: 5000
+    min_volume_bars: 50
+    poc_deviation_atr: 0.5
+    position_coeff: 0.3
+    stop_atr: 0.3
+
+  vol_squeeze_breakout:
+    enabled: false
+    min_account_balance: 5000
+    bb_period: 20
+    squeeze_threshold: 0.5
+    confirm_bars: 2                 # 增加确认K线
+    position_coeff: 0.4
+
+  micro_scalp_obi:
+    enabled: false
+    min_account_balance: 5000
+    bpi_threshold: 0.3
+    takerflow_threshold: 0.1
+    position_coeff: 0.1
+    target_atr: 0.3
+    stop_atr: 0.2
+    max_freq_per_min: 1
+
+# -----------------------------------------------------------------------------
+# 波浪相似度
+# -----------------------------------------------------------------------------
+wave_similarity:
+  enabled: false
+  min_similarity: 0.4
+  boost_factor: 0.1
+  max_boost: 0.5
+  tight_stop_ratio: 0.7
+  max_pattern_count: 1000
+  eviction_policy: "LRU"
+  max_memory_mb_limit: 50
+  max_sequence_length: 100
+
+# -----------------------------------------------------------------------------
+# 多周期共振
+# -----------------------------------------------------------------------------
+resonance:
+  enabled: true
+  weight: 0.5
+  max_boost: 1.5
+  min_reduce: 0.3
+  hard_boost_cap_notional: auto     # 基于风险预算计算最大名义价值
+  smooth_halflife: "auto"
+  auto_halflife_atr_low: 6
+  auto_halflife_atr_high: 2
+  max_halflife: 8
+  max_position_change_ratio: 0.2
+  exempt_for_initial_entry: true    # 首次开仓不受仓位变化限制
+  skip_ratio_on_gap: true
+  respect_risk_limit: true
+
+# -----------------------------------------------------------------------------
+# 自适应阶段支撑/阻力
+# -----------------------------------------------------------------------------
+adaptive_sr:
+  enabled: true
+  method: "swing_volume"
+  swing_lookback: 5
+  min_swing_distance_atr: 0.5
+  min_touches: 2                   # 至少2次触及才视为有效
+  regime_confirm_bars: 6
+  freeze_on_regime: true
+  recalc_on_regime_change: true
+  min_sr_distance_atr: 0.3
+
+# -----------------------------------------------------------------------------
+# 辅助功能
+# -----------------------------------------------------------------------------
+# 相关性矩阵更新
+correlation_update_interval_hours: 4
+
+# 日志增强：记录自适应缩放后的实际参数
+log_adapted_params: true
+
+# AI 辅助 (DeepSeek)
+ai_assist:
+  enabled: true
+  max_calls_per_hour: 20
+  cost_alert_threshold_usd: 1.0
