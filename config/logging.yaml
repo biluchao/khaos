@@ -1,0 +1,294 @@
+# =============================================================================
+# KHAOS 日志配置文件 v20.0 (不可篡改审计堡垒)
+# =============================================================================
+# 本文件定义系统的日志记录、审计、远程传输及完整性校验。
+# 遵循华尔街/机构级合规标准，支持异步高性能写入、多级脱敏、
+# 链式签名、WORM存储、实时流控与灾难恢复。
+# 适用于2000美金至万亿美金账户。
+# 作者: KHAOS 系统架构组
+# 最后修改: 2026-07-07
+# config_version: 20.0
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 全局日志设置
+# -----------------------------------------------------------------------------
+global:
+  level: INFO                             # 动态可调（通过API）
+  dynamic_level: true                     # 允许运行时调整
+  audit_level: INFO                       # 审计日志独立级别
+  console_enabled: true
+  default_format: json                    # 全局默认格式
+  timestamp_format: iso8601_utc
+  timestamp_field: "@timestamp"
+  sanitize_sensitive: true
+  sanitize_log_injection: true            # 防止CRLF注入
+  hash_salt: ${KHAOS_LOG_HASH_SALT}
+  custom_sensitive_keys: []               # 用户可扩展敏感字段
+  sensitive_patterns:
+    - "(api[_-]?key|secret|password|token)=[^&\\s]+"
+    - "Bearer [A-Za-z0-9._\\-]+"
+  json_sanitize: true                     # 递归处理JSON字段
+  multiline_sanitize: true
+  event_id: true                          # 每条日志生成UUID
+  trace_id:
+    enabled: true
+    header: X-Trace-ID
+  startup_banner: true                    # 启动时打印日志配置摘要
+  on_log_failure: alert_and_continue      # 日志失败不影响交易
+
+# -----------------------------------------------------------------------------
+# 日志输出目标
+# -----------------------------------------------------------------------------
+handlers:
+  # 控制台
+  console:
+    enabled: true
+    level: INFO
+    format: standard
+    stream: stderr                        # 可选 stdout/stderr
+    encoding: utf-8
+
+  # 主日志文件 (按大小和时间轮转)
+  file:
+    enabled: true
+    level: INFO
+    format: json
+    filename: ${KHAOS_LOG_DIR:-/var/log/khaos}/system.log
+    fallback_log_dir: /var/log/khaos
+    max_bytes: 10485760                   # 10MB (小账户5MB)
+    backup_count: 30
+    encoding: utf-8
+    async_enabled: true
+    async_queue_size: 1000
+    flush_interval_sec: 1
+    flush_on_critical: true
+    file_mode: a
+    file_permissions: 600
+    dir_permissions: 700
+    rotation:
+      time: midnight
+      interval: 1
+
+  # 错误日志
+  error_file:
+    enabled: true
+    level: ERROR
+    format: json
+    filename: ${KHAOS_LOG_DIR:-/var/log/khaos}/error.log
+    max_bytes: 10485760
+    backup_count: 10
+    encoding: utf-8
+    include_traceback: true
+    include_request_id: true
+    async_enabled: true
+
+  # 审计日志 (不可篡改)
+  audit_file:
+    enabled: true
+    level: INFO
+    format: json
+    filename: ${KHAOS_LOG_DIR:-/var/log/khaos}/audit.log
+    max_bytes: 52428800                   # 50MB
+    backup_count: 1825                    # 5年每日
+    encoding: utf-8
+    immutable: true
+    immutable_backend: filesystem         # 尝试 chattr +i，失败回退签名
+    fallback_to_signature_only: true
+    signature_algorithm: SHA256withRSA
+    private_key_path: ${KHAOS_AUDIT_PRIVATE_KEY}
+    public_key_path: ${KHAOS_AUDIT_PUBLIC_KEY}
+    per_entry_signature: true             # 每条记录独立签名
+    include_operator: true
+    async_enabled: true
+    read_only_after_close: true
+
+  # 交易执行日志
+  trade_file:
+    enabled: true
+    level: INFO
+    format: json
+    filename: ${KHAOS_LOG_DIR:-/var/log/khaos}/trades.log
+    max_bytes: 10485760
+    backup_count: 30
+    encoding: utf-8
+    include_raw_messages: false           # 生产关闭
+    mask_fields: [qty, price]
+    async_enabled: true
+
+  # 远程日志 (Syslog/ELK)
+  remote:
+    enabled: false
+    protocol: tcp
+    tls_enabled: true
+    cert_path: /etc/khaos/certs/log_client.pem
+    host: localhost
+    port: 5140
+    format: json
+    level: INFO
+    reconnect:
+      enabled: true
+      max_retries: 3
+    batch_size: 100
+    compression: gzip
+    facility: local0
+    severity_mapping: true
+
+  # 空处理器 (测试用)
+  null_handler:
+    enabled: false
+
+# -----------------------------------------------------------------------------
+# 模块级日志级别
+# -----------------------------------------------------------------------------
+loggers:
+  catch_all: WARNING                      # 未明确配置的默认级别
+  core.engine:
+    level: INFO                           # 生产可调WARNING
+  core.execution:
+    level: INFO
+  core.risk:
+    level: WARNING
+  adapters.market_data:
+    level: WARNING
+  evolution:
+    level: INFO
+  api.requests:
+    level: WARNING
+  api.errors:
+    level: ERROR
+  adapters.storage:
+    level: WARNING
+  third_party:
+    level: WARNING                        # aiolimiter, hmmlearn 等
+
+# -----------------------------------------------------------------------------
+# 日志内容增强
+# -----------------------------------------------------------------------------
+enrichment:
+  instance_id: true
+  instance_id_source: hostname_uuid
+  snapshot_on_trade: true
+  max_snapshot_positions: 10
+  stacktrace_on_error: true
+  stacktrace_in_production: false         # 生产关闭
+  decision_details: true
+  max_decision_detail_chars: 2000
+  intent_logging: true
+  intent_filter: rejected_only
+  reject_reason: required                 # 必填
+  market_context: true
+  context_snapshot_interval_sec: 60
+  context_max_entries: 1000
+
+# -----------------------------------------------------------------------------
+# 日志节流与去重
+# -----------------------------------------------------------------------------
+throttle:
+  enabled: true
+  identical_msg_interval_sec: 5           # 相同消息5秒内去重
+
+# -----------------------------------------------------------------------------
+# 异步日志配置
+# -----------------------------------------------------------------------------
+async:
+  default_queue_size: 1000
+  overflow_policy: drop_oldest
+
+# -----------------------------------------------------------------------------
+# 小账户资源优化
+# -----------------------------------------------------------------------------
+small_account:
+  enabled: true
+  balance_threshold_usd: 5000
+  actions:
+    reduce_global_level: true
+    reduced_level: WARNING
+    exclude_audit: true                   # 审计日志永不降级
+    reduce_backup_count: true
+    reduced_backup_count: 10
+    audit_backup_count_override: 1825     # 审计备份保持5年
+    reduce_max_bytes: true
+    reduced_max_bytes: 5242880
+    disable_remote: true
+    notify_on_disable: true
+    max_clients_override: 1
+    disk_monitor_override:
+      warn_pct: 70
+      critical_pct: 85
+
+# -----------------------------------------------------------------------------
+# 日志保留与归档
+# -----------------------------------------------------------------------------
+retention:
+  system_log_days: 30
+  error_log_days: 90
+  audit_log_days: 1825
+  audit_worm_storage: true                # 要求WORM存储
+  trade_log_days: 365
+  compress_archived: true
+  compression:
+    algorithm: gzip
+    level: 6
+  archive_path: ${KHAOS_LOG_DIR:-/var/log/khaos}/archive
+  audit_archive_path: ${KHAOS_LOG_DIR:-/var/log/khaos}/audit_archive
+  auto_create_dir: true
+  archive_checksum: true
+  index_archived_logs: false              # 可选
+
+# -----------------------------------------------------------------------------
+# 实时日志流 (WebSocket 推送)
+# -----------------------------------------------------------------------------
+live_stream:
+  enabled: true
+  auth_required: true
+  max_clients: 3
+  filter_level: WARNING
+  debug_override: false
+  buffer_size: 500
+  buffer_full_action: drop_oldest
+  heartbeat_interval_sec: 30
+
+# -----------------------------------------------------------------------------
+# 磁盘空间监控
+# -----------------------------------------------------------------------------
+disk_monitor:
+  enabled: true
+  warn_pct: 80
+  critical_pct: 95
+  action_on_critical: stop_logging_and_alert
+
+# -----------------------------------------------------------------------------
+# 日志完整性校验 (审计链)
+# -----------------------------------------------------------------------------
+integrity:
+  chain_hash: true
+  hash_algorithm: SHA256
+  chain_seed_file: ${KHAOS_DATA_DIR}/audit_chain.seed
+  verify_on_startup: true
+  action_on_tamper: halt                  # alert / halt
+  halt_confirmation: true
+  export_verification_report: true
+  hsm_support:
+    enabled: false
+    pkcs11_lib: ""
+
+# -----------------------------------------------------------------------------
+# 灾难恢复注释
+# -----------------------------------------------------------------------------
+disaster_recovery:
+  note: >
+    若日志系统完全损坏，请按以下步骤恢复：
+    1. 从远程备份存储 (WORM) 恢复审计日志。
+    2. 使用 integrity.export_verification_report 验证链完整性。
+    3. 系统将自动从检查点恢复交易日志。
+    4. 丢失的非审计日志将标记为缺失，但不影响合规。
+  contact: "KHAOS 运维组"
+
+# -----------------------------------------------------------------------------
+# 集成注释 (非功能配置)
+# -----------------------------------------------------------------------------
+integration_notes: |
+  ELK 集成: 配置 remote handler 指向 Logstash。
+  Prometheus: 日志错误计数器自动上报至 metrics 端口。
+  审计查询: 使用 audit_file 的 JSON 格式导入 SQL 数据库进行高级查询。
