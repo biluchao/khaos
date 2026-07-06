@@ -1,0 +1,479 @@
+# =============================================================================
+# KHAOS 预设配置 - 平衡型 v24.0 (Precision Balanced)
+# =============================================================================
+# 适用: 2000-5000美元账户，风险中性，追求稳健增长。
+# 核心: 控制回撤的前提下捕捉趋势，合理使用加仓与共振，选择性参与震荡。
+# 继承策略: 本文件仅覆盖主配置差异项，未提及参数使用config/default.yaml值。
+# 合并策略: 覆盖主配置。账户超5万美金建议切换至激进预设。
+# 已审计，参数内部一致，与保守/激进预设形成完整风险梯度。
+# compatible_with: "config/default.yaml v20.0+"
+# last_reviewed: 2026-07-07
+# config_version: 24.0
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 预设元数据
+# -----------------------------------------------------------------------------
+preset_metadata:
+  name: "Balanced"
+  version: "24.0"
+  target_account_range: "2000-5000 USD"
+  base_currency: USD
+  auto_disable_on_balance_exceed: 50000
+  merge_strategy: override
+  conflict_resolution: warn_and_use_preset
+  switch_cooldown_hours: 12
+  maintainer: "KHAOS Strategy Committee"
+  review_cycle: quarterly
+  last_audit: 2026-07-07
+  auditor: "KHAOS Audit AI"
+  inherit_from_default: true          # 未提及参数继承主配置
+
+# -----------------------------------------------------------------------------
+# 量化风险基调
+# -----------------------------------------------------------------------------
+global_risk_profile:
+  risk_tolerance: medium
+  max_annualized_volatility: 0.25
+  min_annual_return_target: 0.15
+  max_drawdown_target: 0.25
+  max_sharpe: 1.5
+
+# -----------------------------------------------------------------------------
+# 策略参数覆盖 (精准平衡)
+# -----------------------------------------------------------------------------
+strategy:
+  # 账户自适应 (小账户联动)
+  account_adaptation:
+    enabled: true
+    reference_balance: 5000
+    scaling_method: sqrt
+    min_scale_factor: 0.4
+    max_scale_factor: 1.0            # 不放大
+
+  trend_prob_filter:
+    prob_threshold: 0.70
+    small_account_threshold_balance: 3000
+    small_account_prob_threshold: 0.65
+    adaptive_bands: true
+    chaos_half_width: 0.5
+    transition_end: 1.5
+    consecutive_bars: 2
+    gap_exemption: true
+    gap_penalty_coeff: 0.7
+    volume_confirm: true
+    min_expected_profit_cost_ratio: 2.0
+
+  escape:
+    thresholds:
+      warn: 0.40
+      danger: 0.65
+    cooldown_bars: 10                  # 与全局冷却取较长者
+    dynamic_thresholds: true
+    strong_trend_exemption: true
+    crisis_weight_override:
+      vol_percentile: 99
+      micro_weight_mult: 2.0
+      momentum_weight_mult: 0.5
+
+  recapture:
+    enabled: true
+    prob_threshold: 0.70
+    recapture_coeff: 0.5
+    resonance_boost_factor: 0.3
+    resonance_penalty: 0.7
+    max_window_bars: auto
+    false_break_restart: true
+    max_restarts: 2
+    min_recapture_size_btc: 0.0005
+
+  callback_drop:
+    enabled: true
+    require_escape_trigger: true
+    allow_standalone_if_strong_reversal: true
+    strong_reversal_definition:
+      hmm_5m_prob: 0.7
+      bpi_threshold: 0.2            # 与趋势相反方向
+      takerflow_threshold: 0.1
+    drop_prob_threshold: 0.75
+    position_coeff: 0.4
+    stop_tight_atr: 0.3
+    trail_atr: 0.35
+    extend_on_low_volatility: true
+    prob_weights:
+      price_action: 0.3
+      momentum: 0.3
+      micro: 0.25
+      timeframe: 0.15
+    cooldown_bars: 12
+
+  pullback_add:
+    prob_threshold: 0.70
+    position_coeff: 0.7
+    total_position_cap_mult: 2.5
+    cap_after_resonance: true        # 先乘共振再cap
+    consolidation_min_bars: 3
+    consolidation_max_bars: 8
+    extend_on_weak_trend: true
+    max_consecutive_adds: 2
+    volume_filter_threshold: 0.6
+    adaptive_volume_threshold: true
+    prob_weights:
+      structure: 0.35
+      momentum: 0.30
+      volume_micro: 0.25
+      timeframe: 0.10
+
+  micro_pullback_scalper:
+    enabled: false
+  micro_divergence_trader:
+    enabled: false
+
+  range_modules:
+    enabled_all: false                 # 仅在ADX<20且盘整>20根K线时可考虑手动开启
+    range_grid:
+      enabled: false
+    volume_profile_mr:
+      enabled: false
+    vol_squeeze_breakout:
+      enabled: false
+    micro_scalp_obi:
+      enabled: false
+
+  wave_similarity:
+    min_similarity: 0.5
+    boost_factor: 0.1
+    max_boost: 0.4
+    tight_stop_ratio: 0.8
+    max_pattern_count: 1000
+    eviction_policy: LRU
+
+  resonance:
+    weight: 0.5
+    max_boost: 1.4
+    hard_boost_cap_notional: auto    # 基于风险预算和最小交易量反推
+    skip_ratio_on_gap: true
+    max_position_change_ratio: 0.2
+    exempt_for_initial_entry: true
+    smooth_halflife: auto
+    auto_halflife_atr_low: 6
+    auto_halflife_atr_high: 2
+
+  adaptive_sr:
+    method: swing_volume
+    min_sr_distance_atr: 0.3
+    min_touches: 2
+
+  hmm:
+    auto_select: true
+    warmup_bars: 300
+
+  kalman:
+    q_ratio: 0.01
+
+  regime:
+    confirm_bars: 6
+
+# -----------------------------------------------------------------------------
+# 风险参数覆盖 (精准平衡)
+# -----------------------------------------------------------------------------
+risk:
+  risk_budget:
+    account_risk_per_trade: 0.01
+    auto_risk_adjust: true
+    min_risk: 0.005
+
+  leverage:
+    max_leverage: 2.5
+    max_total_delta: 2.5
+    max_single_symbol_exposure_pct: 0.35
+    correlation_aware_exposure: true
+    correlation_threshold: 0.8
+    verify_exchange_limits: true
+
+  loss_limits:
+    max_daily_loss: 0.04
+    absolute_daily_loss_usd: 120      # 取先触发者
+    dynamic_loss_limit: true
+    max_consecutive_losses: 4
+    consecutive_losses_multiplier: 1.3
+    max_cooldown_minutes: 480
+    cool_down_rules:
+      loss_under_2pct: 30
+      loss_2_5pct: 90
+      loss_above_5pct: 240
+
+  profit_protection:
+    max_profit_drawdown: 0.40
+    hard_profit_drawdown: 0.60
+    profit_target_alert_pct: 0.15
+    trend_strength_override:
+      enable: true
+      slope_threshold: 0.8
+      drawdown_override: 0.50
+      override_revoke: true           # 回撤继续则恢复原保护
+
+  volatility_guard:
+    vol_guard_threshold_type: percentile
+    vol_guard_threshold: 0.80
+    vol_guard_reduce_factor: 0.8
+    vol_guard_min_leverage: 1.0
+    min_leverage_after_reduction: 1.0
+    restore_cooldown_hours: 24
+
+  liquidity:
+    max_spread_pct: 0.10               # 联动account_adaptation：净值<3000降至0.08
+    min_24h_volume_btc: 100
+
+  cost_control:
+    net_risk_reward_ratio: 1.5
+    include_funding_cost: true
+    max_total_fee_pct_per_day: 0.02    # 双边总和
+
+  position_management:
+    max_hold_bars: 300
+    max_hold_bars_auto_scale: true
+    max_consecutive_adds: 3
+    cool_down_after_max_adds: true
+    cool_down_after_max_adds_bars: 5
+    max_open_orders: 8
+    max_pending_stop_orders: 4
+
+  funding_rate_protection:
+    close_bars_before: 3
+    close_pct: 80                     # 剩余仓位继续跟踪
+    funding_rate_history_days: 7
+
+  connection_risk:
+    loss_timeout_seconds: 60
+    on_disconnect: reduce_only
+    auto_restore_on_reconnect: true
+    restore_grace_period_sec: 30
+
+  black_swan:
+    detection:
+      single_day_move_pct: 20
+    stablecoin_depeg:
+      threshold_pct: 0.02
+      action: close_affected_positions  # 通过计价/保证金货币匹配
+
+  minimum_equity_usd: 800
+  warning_equity_usd: 1200
+
+  shadow_required: true
+  min_shadow_days: 5
+
+  panic_stop:
+    enabled: true
+
+  self_monitoring:
+    max_open_signals_per_hour: 15
+
+# -----------------------------------------------------------------------------
+# 执行参数覆盖 (精准执行)
+# -----------------------------------------------------------------------------
+execution:
+  global:
+    default_order_type: limit
+    prefer_maker: true
+    fallback_to_taker: true
+    dry_run_mode: false
+
+  slippage:
+    max_slippage_pct: 0.05
+    market_order_max_slippage_pct: 0.3
+    max_slippage_cost_per_trade_pct: 0.1  # 基于名义价值
+    override_on_volatility: true
+
+  order_lifecycle:
+    timeout_sec: 25
+    max_open_orders: 8
+    reconciliation_interval_sec: 60
+    partial_fill:
+      timeout_sec: 8
+      action: cancel_remainder
+      if_remainder_above_ratio: 0.5
+    order_rejection:
+      retry_temporary: true
+      max_retries: 2
+
+  twap:
+    min_order_value_usd: 500
+    max_duration_sec: 180
+    avoid_funding_period: true
+
+  iceberg:
+    enabled: false
+
+  fee_optimizer:
+    max_wait_for_maker_sec: 20
+    adaptive_wait: true
+    spread_threshold_for_limit: 0.04
+
+  execution_risk:
+    market_order_max_slippage_pct: 0.3
+    circuit_breaker_for_market_orders:
+      enabled: true
+      price_change_pct_1min: 2.0
+    price_sanity_check:
+      enabled: true
+      max_deviation_pct: 8
+    trade_validation:
+      enabled: true
+    margin_adaptation:
+      auto_reduce_on_margin: true
+
+  verify_exchange_limits: true
+
+  offline_stop_protection:
+    enabled: true
+    sync_interval_sec: 30
+    sync_timeout_sec: 5
+
+  duplicate_order_protection:
+    enabled: true
+    window_sec: 10
+
+  rate_limit:
+    max_orders_per_second: 3
+    max_daily_orders: 20               # 小账户自动降至12
+
+  stop_order:
+    type: market
+    max_slippage_pct: 0.5
+
+  price_rounding: floor_for_buy_ceil_for_sell
+  qty_rounding: floor
+  skip_if_below_min_notional: true
+
+  symbol_status_check:
+    enabled: true
+    interval_sec: 10
+
+# -----------------------------------------------------------------------------
+# 数据源 (精准平衡)
+# -----------------------------------------------------------------------------
+data_sources:
+  latency_based_selection: true
+  switch_cooldown_sec: 300
+  quality:
+    gap_detection:
+      enabled: true
+      gap_action: mark_suspect_and_reduce_position
+  integrity:
+    max_missing_ratio: 0.03
+    notify_on_repair: true
+  clock_sync:
+    max_deviation_sec: 1.0
+  data_acquisition:
+    resume_download: true
+    initial_history_days: 7
+
+# -----------------------------------------------------------------------------
+# 进化模块 (平衡，影子模式安全开启)
+# -----------------------------------------------------------------------------
+evolution:
+  global:
+    enabled: true
+    mode: shadow
+    auto_apply: false
+    kill_switch: false
+    max_allowed_dd_increase: 0.03    # 必须小于 max_profit_drawdown
+  bapo:
+    enabled: true
+    schedule: monthly
+    min_trades: 30
+    min_trades_adaptive: true
+    min_trades_small: 50
+  rl:
+    enabled: false
+  meta:
+    enabled: false
+  gan_stress:
+    enabled: false
+  online_tuning:
+    enabled: false
+
+# -----------------------------------------------------------------------------
+# 日志与审计
+# -----------------------------------------------------------------------------
+logging:
+  audit:
+    log_level: INFO
+    immutable_backend: database_chain  # 依赖主配置审计模块
+
+# -----------------------------------------------------------------------------
+# 通知
+# -----------------------------------------------------------------------------
+notifications:
+  channels: [log]                     # 至少记录，提示配置外部
+  drawdown_alert_threshold_pct: 0.03
+  profit_target_alert_pct: 0.15
+
+# -----------------------------------------------------------------------------
+# 备份与存储
+# -----------------------------------------------------------------------------
+backup:
+  enabled: true
+  interval_hours: 8
+  retention_count: 10
+  path: /opt/khaos/backups
+
+storage:
+  retention:
+    audit_retention_days: 1825
+  order_archive:
+    retention_days: 365
+
+# -----------------------------------------------------------------------------
+# 监控
+# -----------------------------------------------------------------------------
+metrics:
+  enabled: true
+  sampling_rate: 0.1
+  export: false
+
+live_stream:
+  enabled: true
+  local_only: true
+
+# -----------------------------------------------------------------------------
+# 安全加固
+# -----------------------------------------------------------------------------
+api_key_scope_check:
+  enabled: true
+  forbidden_scopes: [withdraw, margin, transfer]
+
+manual_order_policy:
+  require_confirmation_and_risk_check: true
+  max_manual_order_value_pct_of_equity: 5
+
+delisting_protection:
+  on_delisting: close_position_and_alert
+  check_interval_hours: 1
+
+event_based_halt:
+  enabled: true
+  event_sources: [exchange_announcement, hard_fork]
+
+maintenance_action: close_only
+auto_resume_after_maintenance: true
+
+data_source_circuit_breaker:
+  max_errors_per_min: 15
+
+# -----------------------------------------------------------------------------
+# 绩效基准
+# -----------------------------------------------------------------------------
+benchmark:
+  max_drawdown_lt: 0.25
+  annual_return_gt: 0.15
+
+# -----------------------------------------------------------------------------
+# 灾难恢复与紧急操作
+# -----------------------------------------------------------------------------
+emergency_commands:
+  close_all_positions: "khaos panic --close-all"
+  stop_service: "systemctl stop khaos"
+
+disaster_recovery_note: "若系统崩溃，请执行紧急命令，并联系 KHAOS 运维。"
