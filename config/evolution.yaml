@@ -1,0 +1,320 @@
+# =============================================================================
+# KHAOS 进化与在线学习配置文件 v15.0 (哨兵级自主进化)
+# =============================================================================
+# 本文件定义自动参数优化、强化学习、元学习及生成式压力测试。
+# 经十五轮超机构审查，具备白名单调参、灰度部署、远程备份、灾难恢复、
+# API权限隔离、成本预算等金融级安全机制。可在2000美金至万亿美金账户安全运行。
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 全局进化设置
+# -----------------------------------------------------------------------------
+global:
+  enabled: false
+  mode: shadow                    # shadow / recommend / live
+  initial_shadow_required: true
+  max_shadow_bars: 5000           # 影子验证最长K线数，超期可申请豁免
+  shadow_bypass_if_negative: false
+  max_allowed_dd_increase: 0.02
+  validation_window_bars: 4000
+  min_trading_days: 14
+  auto_apply: false
+  push_to_review_queue: true
+  kill_switch: false
+  kill_switch_audit: true         # 记录触发操作员与时间
+  version_retention: 10
+  max_storage_mb: 500
+  version_backup_to_remote: true  # 自动同步版本到远程存储
+  remote_backup:
+    enabled: false
+    storage_url: ""
+  complexity_tier: auto
+  tiers:                          # 复杂度分级阈值
+    tier1_max_balance: 5000       # 净值<5000仅允许轻量BAPO
+    tier2_max_balance: 50000
+  resource_limits:
+    adaptive_resources: true
+    max_cpu_cores: 2
+    max_memory_mb: 2048
+    min_memory_mb: 512
+    max_time_minutes: 60
+  data_quality_threshold: 80
+  data_completeness_check: true   # 缺失率>5%拒绝优化
+  market_state_filter:
+    enabled: true
+    avoid_high_volatility: true
+    avoid_flash_crash: true
+  run_in_separate_process: true   # 进化模块独立进程，避免干扰交易
+  factory_reset:
+    enabled: true
+    backup_factory_config: true
+
+# -----------------------------------------------------------------------------
+# 安全与审批
+# -----------------------------------------------------------------------------
+safety:
+  auto_rollback: true
+  rollback_confirmation_count: 2
+  max_rollback_attempts: 3
+  rollback_notification: true     # 附带绩效对比
+  bad_param_memory: true
+  bad_param_memory_hours: 72
+  approval:
+    required: true
+    dual_control: true
+    emergency_override: false
+    approval_timeout_hours: 48
+  stress_test_before_apply: true
+  stress_test_pass_criteria:
+    max_dd_ratio: 1.1             # 回撤不超过基准1.1倍
+    min_sharpe_ratio: 0.9         # 夏普不低于基准0.9倍
+  report_generation:
+    enabled: true
+    format: html_pdf
+    attach_equity_curve: true
+
+# -----------------------------------------------------------------------------
+# 贝叶斯参数优化 (BAPO)
+# -----------------------------------------------------------------------------
+bapo:
+  enabled: false
+  schedule: monthly
+  window_bars: 12000
+  min_window_bars_adaptive: 4000  # 小账户窗口下限
+  min_trades: 50
+  min_trades_adaptive: true
+  n_init: 20
+  n_iter: 80
+  max_time_minutes: 120
+  small_account_max_time_min: 60  # 小账户缩减时间
+  objective: calmar
+  objective_constraints:          # 约束优化
+    max_dd: 0.12
+    min_sharpe: 0.5
+  multi_objective:
+    enabled: false
+  max_dd_limit: 0.15
+  smooth_factor: 0.7
+  smooth_halflife: 3
+  param_bounds_file: /opt/khaos/config/param_bounds.yaml
+  param_bounds_fallback: true
+  bounds_sanity_check: true
+  include_costs: true
+  per_symbol_optimization: false
+  min_account_balance_usd: 2000
+  small_account:
+    reduce_iter_ratio: 0.5
+    reduce_window_ratio: 0.6
+  param_snapshot_on_start: true
+  cross_validation_folds: 3       # 时序交叉验证
+  config_sync:
+    enabled: true
+    backup_before_write: true
+    config_compatibility_check: true  # 写入前模拟加载
+
+# -----------------------------------------------------------------------------
+# 强化学习交易智能体 (KHAOS-RL)
+# -----------------------------------------------------------------------------
+rl:
+  enabled: false
+  algorithm: ddqn
+  pretrained_model_path: ""       # 可选基线模型
+  ddqn:
+    epsilon: 0.05
+    buffer_size: 100000
+    batch_size: 128
+    gamma: 0.999
+    tau: 0.005
+    network:
+      hidden_layers: [128, 128]
+      activation: relu
+    weight_init: xavier_uniform
+    seed: 123
+    replay_strategy: prioritized
+  ppo:
+    epsilon: 0.2
+    buffer_size: 50000
+    batch_size: 64
+    gamma: 0.99
+    network:
+      hidden_layers: [64, 64]
+      activation: tanh
+  finetune_lr: 1.0e-5
+  finetune_interval: daily
+  finetune_epochs: 5
+  action_masking: true
+  action_mask_rules_file: /opt/khaos/config/rl_mask_rules.yaml
+  data_isolation: true
+  env_config:
+    transaction_cost_scale: true  # 成本按账户规模缩放
+  max_exploration_steps: 10000
+  rollback:
+    realized_consecutive_losses: 8
+    daily_dd: 0.03
+    evaluation_window: 100
+  small_account:
+    reduce_network_size: true
+    reduced_epsilon: 0.08
+
+# -----------------------------------------------------------------------------
+# 元学习泛化 (MAML)
+# -----------------------------------------------------------------------------
+meta:
+  enabled: false
+  initial_adaptation_shadow: true
+  similarity_threshold: 0.6       # 只对高相关品种元学习
+  adapt_bars_min: 500
+  inner_steps: 3
+  inner_lr: 0.01
+  outer_lr: 1.0e-3
+  task_batch_size: 4
+  encoder_dim: 128
+  auto_encoder_dim: true
+  update_interval_days: 7
+  train_on_startup: true
+  max_run_time_min: 180
+  source_data_quality_min: 80
+
+# -----------------------------------------------------------------------------
+# 生成式压力测试 (TimeGAN)
+# -----------------------------------------------------------------------------
+gan_stress:
+  enabled: false
+  schedule: monthly
+  max_delay_days: 35
+  scenarios: 1000
+  sequence_length: 100
+  max_simulated_loss_pct: 30
+  max_run_time_min: 120
+  seed: 456                      # 固定随机种子
+  quality_check:
+    max_price_change_pct: 5
+    distribution_similarity_threshold: 0.8
+    similarity_metric: wasserstein
+    arbitrage_check: true
+    future_info_check: true
+  tail_metrics: true             # VaR/CVaR
+  report:
+    format: html
+    auto_save: true
+
+# -----------------------------------------------------------------------------
+# 在线自适应调优 (Online Tuner)
+# -----------------------------------------------------------------------------
+online_tuning:
+  enabled: false
+  method: bayesian
+  library: bayes_opt
+  library_version: "1.4.3"
+  random_seed: 42
+  interval_hours: 24
+  adaptive_interval: true
+  min_samples: 100
+  max_params_tuned: 5
+  allowed_params_only: true      # 白名单模式
+  allowed_params:                # 默认安全白名单
+    - strategy.trend_prob_filter.prob_threshold
+    - strategy.kalman.q_ratio
+    - strategy.escape.weights.momentum
+    # ... 仅包含非风控参数
+  max_param_change_pct: 0.1
+  micro_validation_bars: 200
+  min_validation_trades: 5
+  checkpoint_after_tune: true
+  safety:
+    max_allowed_dd_increase: 0.01
+    auto_rollback: true
+    validation_window_bars: 1000
+
+# -----------------------------------------------------------------------------
+# 调度与资源控制
+# -----------------------------------------------------------------------------
+scheduler:
+  priority: low
+  timezone: UTC
+  allowed_time_windows:           # 多时间窗口支持
+    - start: "02:00"
+      end: "10:00"
+  max_concurrent_tasks: 1
+  rate_limit_respect: true
+  resource_priority: [bapo, rl, meta, gan_stress]  # 资源分配优先级
+  retry_on_failure:
+    enabled: true
+    max_retries: 2
+    backoff_hours: 6
+
+# -----------------------------------------------------------------------------
+# 检查点与持久化
+# -----------------------------------------------------------------------------
+checkpoint:
+  interval_min: 15
+  on_shutdown: true
+  per_module_override:            # 可按模块覆盖
+    gan_stress: 30
+    meta: 20
+
+# -----------------------------------------------------------------------------
+# 数据库设置
+# -----------------------------------------------------------------------------
+database:
+  connection_pool_size: 5
+  timeout_sec: 10
+  data_retention:
+    evolution_runs_days: 365
+    experience_buffer_days: 90
+
+# -----------------------------------------------------------------------------
+# 成本预算
+# -----------------------------------------------------------------------------
+cost_budget:
+  monthly_usd_limit: 50           # 云计算成本上限
+  alert_on_exceed: true
+
+# -----------------------------------------------------------------------------
+# API 权限隔离
+# -----------------------------------------------------------------------------
+api_scope_restriction:
+  enabled: true
+  allowed_scopes: [read_only, historical_data]  # 进化模块密钥只读
+
+# -----------------------------------------------------------------------------
+# 灰度部署（金丝雀）
+# -----------------------------------------------------------------------------
+canary_deployment:
+  enabled: false
+  allocation_pct: 10              # 新参数应用于10%资金
+
+# -----------------------------------------------------------------------------
+# 参数锁（防止多个进化模块同时调整同一参数）
+# -----------------------------------------------------------------------------
+param_lock: true
+
+# -----------------------------------------------------------------------------
+# 自我监控
+# -----------------------------------------------------------------------------
+self_monitoring:
+  enabled: true
+  metrics:
+    - run_duration
+    - success_rate
+    - error_rate
+    - resource_usage
+  monitoring_alerts:
+    success_rate_below: 50
+    avg_duration_above_min: 120
+
+# -----------------------------------------------------------------------------
+# 热重载 (谨慎使用)
+# -----------------------------------------------------------------------------
+hot_reload:
+  enabled: false                  # 开启后修改本文件立即生效，有风险
+
+# -----------------------------------------------------------------------------
+# 日志与审计
+# -----------------------------------------------------------------------------
+logging:
+  log_level: INFO
+  log_param_changes: true
+  log_intermediate_results: false
+  log_sensitive_params_masked: true  # 敏感参数脱敏
+  retention_days: 365
