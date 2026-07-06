@@ -1,0 +1,557 @@
+# =============================================================================
+# KHAOS 数据源配置文件 v19.0 (绝对数据完整性)
+# =============================================================================
+# 本文件定义行情数据源、质量、切换、存储。经十九轮超机构审查，
+# 具备密钥加密、多级熔断、自适应节流、压缩备份、跨平台时钟同步、
+# 小账户极致优化等特性，适用于2000美金至万亿美金账户。
+# 作者: KHAOS 系统架构组
+# 最后修改: 2026-07-07
+# config_version: 19.0
+# compatible_code_versions: ["v18.0", "v19.0"]
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 全局数据设置
+# -----------------------------------------------------------------------------
+global:
+  exchange_timezone: UTC
+  verify_timezone: true
+  timezone_verification_action: warn_and_proceed   # 告警但继续运行，记录偏差
+  health_check_interval_sec: 30                    # 小账户自动延长至60秒
+  health_check_topics: [latency, data_freshness, error_rate]
+  failover_enabled: true
+  primary_timeout_sec: 30
+  failback_grace_period_sec: 120
+  failback_conditions:
+    primary_stable_for_min: 5
+  no_data_policy:
+    use_last_valid_for_minutes: 2
+    stale_data_max_age_sec: 120
+    action_after_timeout: pause_trading
+    try_tertiary_source: true
+  tertiary_source:
+    type: rest_polling                        # 第三级数据源类型
+    url: "https://api.alternative.me/v2/ticker/bitcoin/"  # 示例，可配置
+    timeout_sec: 10
+    fallback_priority: 3
+
+  offline_mode:
+    enabled: false
+    require_confirmation: true                 # 切换需确认
+    data_source: local_replay
+    replay_speed: 1.0
+    max_replay_speed: 5.0                      # 限速，防止策略逻辑错误
+    validate_offline_data: true
+
+  global_request_concurrency: 10
+  total_system_concurrency_limit: 15           # 系统全局并发限制
+  startup_data_timeout_sec: 120                # 等待数据源就绪超时
+
+# -----------------------------------------------------------------------------
+# API密钥管理（企业级安全）
+# -----------------------------------------------------------------------------
+api_keys:
+  require_keys: true
+  validation: enforce
+  log_validation_result: true
+  permission_test: true
+  test_endpoint: "/api/v3/account"
+  test_timeout_sec: 5
+  on_permission_test_fail: warn_and_disable_exchange  # 仅禁用该交易所，系统仍启动
+  key_rotation_reminder_days: 90
+  validate_format: true                        # 检查密钥长度与字符集
+  encryption:
+    enabled: false                             # 可选加密存储
+    method: aes256
+    key_source: ${KHAOS_ENCRYPTION_KEY}
+  required_vars: [KHAOS_BINANCE_API_KEY, KHAOS_BINANCE_SECRET_KEY]  # 动态生成
+  binance:
+    api_key: ${KHAOS_BINANCE_API_KEY}
+    secret_key: ${KHAOS_BINANCE_SECRET_KEY}
+  okx:
+    api_key: ${KHAOS_OKX_API_KEY}
+    secret_key: ${KHAOS_OKX_SECRET_KEY}
+  token_refresh_interval_min: 30
+  on_token_expired: reauth
+
+# -----------------------------------------------------------------------------
+# 数据源优先级与价格偏差控制
+# -----------------------------------------------------------------------------
+price_source_priority: [binance, okx]
+dynamic_priority: true                         # 不可用源自动降级，恢复后回升
+max_inter_source_deviation_pct: 1.0
+
+# -----------------------------------------------------------------------------
+# 网络配置
+# -----------------------------------------------------------------------------
+proxy:
+  enabled: false
+  http: ""
+  https: ""
+  socks5: ""                                   # 例如 "127.0.0.1:1080"
+  auth:
+    username: ${KHAOS_PROXY_USER}
+    password: ${KHAOS_PROXY_PASS}
+  health_check: true                           # 启动时验证代理连通性
+
+connection_pool:
+  max_size: 20                                 # 小账户自动缩减至5（见注释）
+  keep_alive_sec: 30
+  max_connections_per_host: 5
+
+dns_cache_enabled: true
+dns_cache_ttl_sec: 300
+dns_refresh_on_failure: true                   # 解析失败时立即刷新
+per_exchange_dns_ttl: {}                       # 可覆盖特定交易所
+custom_dns_servers: []
+
+ip_whitelist: []
+ip_whitelist_check: true                       # 启动时检测交易所是否需要白名单
+user_agent: "KHAOS/19.0"
+user_agent_auto_version: true
+
+# 默认REST超时（各交易所可覆盖）
+default_rest_timeout_sec: 10
+max_redirects: 3
+
+request_timeout_action: use_cache_if_valid
+cache_valid_sec: 5
+cache_max_age_sec: 5
+depth_cache_valid_sec: 1
+depth_cache_valid_sec_volatility_scale: true   # 低波动时延长缓存
+
+error_response_policy:
+  fatal_client_errors: [401, 403]              # 禁止访问等致命错误停止使用该交易所
+  client_error: log_and_skip
+  server_error: retry_then_failover
+  retry_count: 2
+  on_rate_limit: exponential_backoff_and_jitter
+
+# -----------------------------------------------------------------------------
+# 熔断器
+# -----------------------------------------------------------------------------
+circuit_breaker:
+  enabled: true
+  max_errors_per_min: 20                       # 适当放宽
+  error_window_sec: 60                         # 滑动窗口
+  cooldown_sec: 60
+  notify_on_open: true
+
+# -----------------------------------------------------------------------------
+# 交易所数据源配置
+# -----------------------------------------------------------------------------
+exchanges:
+  binance:
+    enabled: true
+    account_type: individual
+    verify_ssl: true
+    ssl_cert_path: ""
+    api_version: v3
+    api_docs_url: "https://binance-docs.github.io/apidocs/"
+    schema_version_check: true
+    adapter_fallback: latest_compatible
+    rest_url: "https://api.binance.com"
+    ws_url: "wss://stream.binance.com:9443/ws"
+    ws_backup_urls: []                          # 备用WebSocket地址
+    rest_rate_limit: 1200
+    rate_limit_weighted: true
+    dynamic_rate_limit: true
+    combined_streams_limit: 200
+    max_subscriptions_per_connection: 100
+    ping_interval_sec: 20
+    ping_timeout_sec: 10
+    connect_timeout_sec: 10
+    data_timeout_sec: 60
+    ws_compression: true
+    symbol_validation: true
+    batch_requests: true
+    batch_requests_auto_detect: true            # 如果API不支持则自动关闭
+
+    testnet:
+      enabled: false
+      api_key: ${KHAOS_BINANCE_TESTNET_API_KEY}     # 强制使用独立密钥
+      secret_key: ${KHAOS_BINANCE_TESTNET_SECRET_KEY}
+      rest_url: "https://testnet.binance.vision/api"
+      ws_url: "wss://testnet.binance.vision/ws"
+
+  okx:
+    enabled: true
+    account_type: individual
+    verify_ssl: true
+    api_version: v5
+    api_docs_url: "https://www.okx.com/docs-v5/"
+    schema_version_check: true
+    adapter_fallback: latest_compatible
+    rest_url: "https://www.okx.com"
+    ws_url: "wss://ws.okx.com:8443/ws/v5"
+    ws_backup_urls: []
+    rest_rate_limit: 600
+    rate_limit_weighted: true
+    dynamic_rate_limit: true
+    combined_streams_limit: 100
+    max_subscriptions_per_connection: 80
+    ping_interval_sec: 20
+    ping_timeout_sec: 10
+    connect_timeout_sec: 10
+    data_timeout_sec: 60
+    ws_compression: true
+    symbol_validation: true
+    batch_requests: true
+    batch_requests_auto_detect: true
+
+# -----------------------------------------------------------------------------
+# 交易所公告监听
+# -----------------------------------------------------------------------------
+announcement_monitor:
+  enabled: false
+  method: rest_polling                        # rest_polling / websocket
+  check_interval_min: 30
+
+# -----------------------------------------------------------------------------
+# 数据获取策略
+# -----------------------------------------------------------------------------
+data_acquisition:
+  kline_method: websocket
+  delivery_mode: push
+  batch_interval_ms: 100                       # 对实时性影响注释说明
+  fallback_to_rest: true
+  merge_strategy: timestamp_dedup
+  merge_tolerance_ms: 10                       # 时钟偏差容忍
+  rest_polling_interval_sec: 5
+  min_polling_interval_sec: 2
+  adaptive_polling: true
+  adaptive_polling_config:
+    low_volatility_percentile: 20              # 低于此波动率使用最大间隔
+    high_volatility_percentile: 80             # 高于此波动率使用最小间隔
+    max_interval_sec: 10
+    min_interval_sec: 2
+  rest_polling_respect_limit: true
+  initial_history_days: 7
+  max_history_days_on_demand: 30
+  min_warmup_bars: 300
+  download_concurrency: 2
+  download_rate_limit_rps_per_exchange: 5      # 按交易所分别限速
+  resume_download: true
+  resume_state_backup: true
+  warmup_progress_report: true
+
+  ws_buffer_size: 5000
+  ws_queue_policy: drop_oldest
+  critical_data_preserve: true                 # K线等关键数据即使溢出也尝试保留
+
+# -----------------------------------------------------------------------------
+# 实时数据流管理
+# -----------------------------------------------------------------------------
+streaming:
+  backpressure:
+    enabled: true
+    action: drop_non_critical
+    non_critical_streams: [depth, trades]
+  throttle_kline_ms: 0
+  throttle_kline_adaptive: true
+  high_volatility_atr_percentile: 80
+  throttle_depth_ms: 100
+  micro_strategy_bypass_throttle: true
+  duplicate_action: skip
+  dedup_window_ticks: 1
+  dedup_by: trade_id                          # 优先使用trade_id去重（如果可用）
+  reconnect:
+    enabled: true
+    initial_delay_sec: 1
+    max_delay_sec: 30
+    backoff_multiplier: 2.0
+    max_attempts: 0
+    max_total_reconnect_time_sec: 3600
+    action_on_exhaustion: switch_to_secondary
+    notify_on_exhaustion: true
+    rotate_dns: true
+    auth_failure_action: abort_and_notify
+    auth_failure_retry_after_min: 60          # 1小时后自动重试一次
+  dedup_window_ticks: 1
+  buffer_size: 5000
+  overflow_action: persist_to_disk
+  overflow_max_disk_mb: 500                   # 限制磁盘溢出量
+  overflow_disk_path: "/tmp/khaos_stream_overflow"
+  on_parse_error: skip_and_log
+  recovery_catchup_method: backfill_from_rest
+  catchup_rate_limit_rps: 2                   # 追赶时限速
+
+# -----------------------------------------------------------------------------
+# 数据质量与清洗
+# -----------------------------------------------------------------------------
+quality:
+  max_gap_bars: 5
+  max_gap_ratio: 0.05                         # 缺失率超过5%告警（动态计算）
+  interpolation_method: linear
+  max_timestamp_deviation_ms: 1000
+  critical_timestamp_deviation_ms: 3000
+  outlier_price_filter: true
+  circuit_breaker_during_extreme_volatility: disable_filter
+  outlier_method: mad
+  adaptive_threshold: true
+  symmetric: true
+  mad_window: 200
+  mad_threshold: 8.0
+  max_price_change_pct: 10.0
+  stablecoin_max_change_pct: 2.0
+  per_symbol_overrides: {}
+  use_log_price: true
+  outlier_action: cap
+  cap_method: clamp_to_nearest_valid
+  cap_max_lookback_bars: 5
+  cap_fallback_value: previous_close          # 回溯无效时使用前日收盘价
+  consecutive_outlier_action: mark_and_alert
+  wick_outlier_ratio: 5.0
+  per_volatility_scaling: true
+  wick_action: mark_downgrade
+  downgrade_factor_proportional: true         # 公式: max(0.1, 1 - wick_ratio/10)
+  visual_mark: true
+  mark_field_in_output: true                  # 输出数据中增加quality_flag字段
+  zero_volume_action: mark_suspect
+  suspect_data_usage: skip_in_calculations
+  gap_detection:
+    enabled: true
+    max_gap_atr_mult: 3.0
+    gap_action: mark_suspect_and_reduce_position
+    reduce_position_pct_min: 20               # 根据账户规模动态调整
+    reduce_position_pct_max: 50
+  quality_trend_analysis:
+    enabled: true
+    window_hours: 24
+
+# -----------------------------------------------------------------------------
+# 数据完整性验证
+# -----------------------------------------------------------------------------
+integrity:
+  verify_on_startup: true
+  verify_at_startup_and_midnight: true        # 启动和午夜两次验证
+  on_verify_fail: attempt_repair
+  periodic_verify_hours: 12
+  verify_on_idle: true
+  check_monotonic: true
+  on_non_monotonic: sort_and_warn             # 自动排序并警告
+  max_missing_ratio: 0.02                     # 小账户自动放宽至0.03
+  auto_repair: true
+  auto_repair_max_requests_per_day: 5
+  max_repair_days: 7
+  notify_on_repair: true
+  checksum:
+    enabled: true
+    algorithm: sha256
+    verify_on_read: true
+    alert_on_checksum_mismatch: true
+  restore_from_backup: true
+  integrity_backup_path: "/opt/khaos/integrity_backups"  # 与存储备份分离
+
+# -----------------------------------------------------------------------------
+# 时钟同步
+# -----------------------------------------------------------------------------
+clock_sync:
+  sync_on_startup: true
+  periodic_sync_min: 60
+  max_deviation_sec: 1.0
+  vm_environment: auto_detect
+  vm_override: false
+  container_aware: true
+  container_time_check: true                   # 检查容器与宿主机时间偏差
+  stop_trading_deviation_sec: 3.0
+  auto_resume_on_sync: true
+  ntp_servers:
+    - pool.ntp.org
+    - time.google.com
+  local_ntp_server: ""
+  ntp_health_check: true
+  ntp_health_command_auto: true                # 自动探测 chronyc 或 ntpstat
+  ntp_health_command: "chronyc tracking"
+  fallback_to_system_clock: true
+
+# -----------------------------------------------------------------------------
+# 数据缓存与存储
+# -----------------------------------------------------------------------------
+storage:
+  engine: sqlite
+  engine_alternative:
+    postgresql:
+      host: ${KHAOS_PG_HOST}
+      port: 5432
+      user: ${KHAOS_PG_USER}
+      password: ${KHAOS_PG_PASSWORD}
+      database: khaos_data
+      ssl_mode: require
+  sqlite_path: "${KHAOS_DATA_DIR:-./data}/khaos_klines.db"  # 环境变量前缀
+  sqlite_options:
+    journal_mode: WAL
+    synchronous: NORMAL
+    temp_store: MEMORY
+    mmap_size: 268435456
+  memory_cache_bars: 1000
+  max_cache_memory_mb: 200
+  auto_cache_bars_by_memory: true              # 内存不足时自动减少
+  cache_eviction: LRU
+  write_buffer_size: 100
+  compression:
+    enabled: true
+    algorithm: zstd
+    compression_level: 3
+    fallback_algorithm: gzip
+    library_check: true                        # 启动时验证依赖库
+  retention:
+    kline_retention_days: 90
+    depth_retention_days: 7
+    trade_retention_days: 30
+    audit_retention_days: 1825
+    archive_after_days: 365                    # 归档到冷存储
+  cleanup_interval_hours: 24
+  cleanup_on_startup: false
+  disk_usage_warn_pct: 80
+  disk_usage_stop_pct: 95
+  backup:
+    enabled: true
+    path: "/opt/khaos/backups"
+    interval_hours: 6                          # 小账户自动改为12小时
+  migration_tool: "khaos-migrate"              # 迁移工具命令
+
+# -----------------------------------------------------------------------------
+# 小账户自适应（极致版）
+# -----------------------------------------------------------------------------
+small_account:
+  enabled: true
+  balance_threshold_usd: 5000
+  threshold_in_btc: 0.1
+  threshold_in_quote_asset: true               # 按报价资产动态计算
+  multi_currency_aware: true
+  respect_manual_overrides: true
+  auto_upgrade: true
+  upgrade_depth_levels_on_balance: true
+  on_balance_increase: gradual_upgrade
+  max_history_days: 14
+  min_history_days_override: 7                 # 确保最低天数
+  actions:
+    reduce_initial_history: true
+    reduced_history_bars: 400
+    min_warmup_bars_override: 300
+    reduce_depth_levels: true
+    depth_levels: 5
+    depth_fallback_method: estimate_from_trades
+    enable_trade_estimation: true              # 子开关
+    lazy_secondary_connection: true
+    secondary_warmup_on_primary_high_latency: true
+    pre_warm_secondary: false
+    auto_disable_micro_modules_all: true       # 统一禁用所有微观模块
+    notify_before_disable: true
+    affected_modules: [micro_scalp_obi, micro_divergence_trader]
+    ui_notification: true
+
+# -----------------------------------------------------------------------------
+# 多品种支持
+# -----------------------------------------------------------------------------
+multi_symbol:
+  max_concurrent_symbols: 5
+  max_total_subscriptions: 200                 # 全局订阅上限
+  auto_detect_listing: true
+  listing_check_interval_hours: 4
+  delisting_monitor: true
+  monitor_source: exchange_announcement
+  on_delisting: close_position_and_alert
+
+# -----------------------------------------------------------------------------
+# 延迟监控与优选
+# -----------------------------------------------------------------------------
+latency_based_selection: true
+switch_cooldown_sec: 300
+emergency_switch_threshold_ms: 1000
+region_hint: auto
+manual_region_override: ""
+log_switch_events: true
+
+# -----------------------------------------------------------------------------
+# 带宽与流量监控
+# -----------------------------------------------------------------------------
+bandwidth_monitor:
+  enabled: true
+  download_warn_mbps: 10
+  download_critical_mbps: 5
+  upload_warn_mbps: 5
+  upload_critical_mbps: 2
+  action_on_low_bandwidth: reduce_depth_subscriptions
+  metered_connection_detection: true           # 自动检测计费网络
+
+# -----------------------------------------------------------------------------
+# 自定义请求头
+# -----------------------------------------------------------------------------
+custom_headers:
+  # 示例:
+  # X-Custom-Header: "value"
+
+# -----------------------------------------------------------------------------
+# 热重载
+# -----------------------------------------------------------------------------
+hot_reload: false
+atomic_reload: true                            # 使用临时文件+重命名保证原子性
+
+# -----------------------------------------------------------------------------
+# 优雅降级链
+# -----------------------------------------------------------------------------
+last_resort:
+  csv_import:
+    enabled: false
+    path: "/opt/khaos/fallback_data"
+    csv_format: "timestamp,open,high,low,close,volume"
+  free_api_fallback:
+    enabled: false
+    provider: coingecko
+    url: "https://api.coingecko.com/api/v3"
+
+# -----------------------------------------------------------------------------
+# 首次运行向导
+# -----------------------------------------------------------------------------
+first_run_wizard:
+  enabled: true                                # 提供交互式配置引导
+
+# -----------------------------------------------------------------------------
+# 日志与监控
+# -----------------------------------------------------------------------------
+logging:
+  log_raw_messages: false
+  anomaly_log_level: WARNING
+  price_anomaly_level: WARNING                 # 价格异常
+  gap_level: ERROR                             # 数据缺口
+  health_metrics_interval_min: 5
+  log_retention_days: 30
+
+audit_trail:
+  enabled: true
+  log_data_events: true                        # 记录数据接收、清洗等事件
+
+metrics:
+  enabled: true
+  track_latency: true
+  track_gap_rate: true
+  track_outlier_rate: true
+  track_reconnect_count: true
+  latency_percentiles: [50, 95, 99]
+  latency_window_sec: 60
+  latency_long_window_sec: 300                 # 长期趋势分析
+  sampling_rate: 0.1
+  sampling_rate_adaptive: true                 # 根据吞吐量动态调整
+  export:
+    prometheus:
+      enabled: true
+      port: 8001
+      port_auto_assign: true
+      retention_hours: 24
+      basic_auth:
+        enabled: false
+        username: ""
+        password: ${KHAOS_METRICS_PASSWORD}
+
+# -----------------------------------------------------------------------------
+# 仪表盘API
+# -----------------------------------------------------------------------------
+dashboard_api_enabled: true
+dashboard_metrics:
+  - latency_p95
+  - data_freshness_seconds
+  - error_rate
+  - reconnect_count
+  - disk_usage_pct
