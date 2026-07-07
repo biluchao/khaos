@@ -1,0 +1,600 @@
+# =============================================================================
+# KHAOS 预设配置 - 激进型 v26.0 (精英激进)
+# =============================================================================
+# 适用: 2000美元以上账户，专业交易者，追求超额收益。
+# 警告: 可能导致重大亏损，请确保完全理解风险。
+# 已针对2000美金小账户进行终极加固，激进风格不变，安全网全面升级。
+# compatible_with: "config/default.yaml v20.0+"
+# last_reviewed: 2026-07-07
+# config_version: 26.0
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 风险披露（强制显示）
+# -----------------------------------------------------------------------------
+risk_disclaimer: |
+  激进策略可能导致快速且重大的资金损失。
+  使用本预设即表示您已充分理解并愿意承担全部风险。
+  系统已针对小账户增加了多层保护，但无法完全消除市场风险。
+
+# -----------------------------------------------------------------------------
+# 预设元数据
+# -----------------------------------------------------------------------------
+preset_metadata:
+  name: "Aggressive"
+  version: "26.0"
+  target_account_range: "2000+ USD (高风险)"
+  base_currency: USD
+  auto_disable_on_balance_exceed: 100000
+  merge_strategy: override
+  conflict_resolution: warn_and_use_preset
+  switch_cooldown_hours: 6
+  maintainer: "KHAOS Alpha Team"
+  review_cycle: monthly
+  last_audit: 2026-07-07
+  auditor: "KHAOS Audit AI"
+  inherit_from_default: true
+  config_signature: "required"          # 本文件需数字签名以确保未被篡改
+
+# -----------------------------------------------------------------------------
+# 量化风险基调
+# -----------------------------------------------------------------------------
+global_risk_profile:
+  risk_tolerance: high
+  max_annualized_volatility: 0.40
+  min_annual_return_target: 0.30
+  max_drawdown_target: 0.40
+  max_sharpe: 2.0
+
+# -----------------------------------------------------------------------------
+# 策略参数覆盖 (精英激进)
+# -----------------------------------------------------------------------------
+strategy:
+  # 账户自适应 (正确缩放)
+  account_adaptation:
+    enabled: true
+    reference_balance: 10000            # 基准1万美金
+    scaling_method: sqrt
+    min_scale_factor: 0.3
+    max_scale_factor: 1.2
+
+  trend_prob_filter:
+    prob_threshold: 0.65
+    small_account_balance: 3000         # 净值低于此值启用小账户调整
+    small_account_prob_threshold: 0.68
+    adaptive_bands: true
+    chaos_half_width: 0.4
+    transition_end: 1.2
+    consecutive_bars: 2
+    gap_exemption: true
+    gap_penalty_coeff: 0.8
+    volume_confirm: true
+    min_expected_profit_cost_ratio: 1.5
+
+  escape:
+    thresholds:
+      warn: 0.45
+      danger: 0.70
+    cooldown_bars: 8
+    small_account_cooldown_override: 10
+    dynamic_thresholds: true
+    strong_trend_exemption: true
+    crisis_weight_override:
+      vol_percentile: 99
+      micro_weight_mult: 1.5
+      momentum_weight_mult: 0.8
+
+  recapture:
+    enabled: true
+    prob_threshold: 0.65
+    recapture_coeff: 0.8
+    recapture_max_total_coeff: 1.0      # 再捕捉仓位乘数上限
+    resonance_boost_factor: 0.4
+    resonance_penalty: 0.5
+    max_window_bars: auto
+    false_break_restart: true
+    max_restarts: 3
+    min_recapture_size_btc: 0.0005
+
+  callback_drop:
+    enabled: true
+    require_escape_trigger: true
+    override_on_manual_confirmation: true
+    allow_standalone_if_strong_reversal: true
+    strong_reversal_definition:
+      hmm_5m_prob: 0.75
+      bpi_threshold: 0.25
+      takerflow_threshold: 0.15
+    drop_prob_threshold: 0.70
+    position_coeff: 0.6
+    stop_tight_atr: 0.35
+    trail_atr: 0.4
+    extend_on_low_volatility: true
+    prob_weights:
+      price_action: 0.3
+      momentum: 0.3
+      micro: 0.25
+      timeframe: 0.15
+    cooldown_bars: 8
+
+  pullback_add:
+    prob_threshold: 0.65
+    position_coeff: 0.9
+    total_position_cap_mult: 3.5
+    cap_after_resonance: true
+    consolidation_min_bars: 2
+    consolidation_max_bars: 10
+    extend_on_weak_trend: true
+    max_consecutive_adds: 4
+    volume_filter_threshold: 0.5
+    adaptive_volume_threshold: true
+    prob_weights:
+      structure: 0.35
+      momentum: 0.30
+      volume_micro: 0.25
+      timeframe: 0.10
+    max_distance_from_kma_atr: 3.0      # 价格远离均线过远禁止加仓
+
+  micro_pullback_scalper:
+    enabled: true
+    min_account_balance: 3000
+    log_module_disabled: true
+    min_trend_slope: 0.03
+    max_retrace_atr: 1.0
+    min_retrace_atr: 0.2
+    position_coeff: 0.4
+    target_atr_mult: 2.0
+    stop_atr: 0.3
+
+  micro_divergence_trader:
+    enabled: true
+    min_account_balance: 3000
+    rsi_period: 7
+    min_slope_strength: 0.05
+    position_coeff: 0.3
+    target_atr: 1.0
+    stop_atr: 0.3
+
+  range_modules:
+    enabled_all: false
+    range_grid:
+      enabled: false
+      min_account_balance: 3000
+    volume_profile_mr:
+      enabled: false
+      min_account_balance: 3000
+    vol_squeeze_breakout:
+      enabled: false
+      min_account_balance: 3000
+    micro_scalp_obi:
+      enabled: false
+      min_account_balance: 3000
+
+  wave_similarity:
+    min_similarity: 0.4
+    boost_factor: 0.15
+    max_boost: 0.6
+    boost_restore_balance: 5000
+    tight_stop_ratio: 0.75
+    max_pattern_count: 2000
+    eviction_policy: LRU
+
+  resonance:
+    weight: 0.7
+    max_boost: 1.8
+    hard_boost_cap_notional: auto      # cap = min(risk_budget*2, balance*0.1)
+    skip_ratio_on_gap: true
+    max_position_change_ratio: 0.3
+    exempt_for_initial_entry: true
+    smooth_halflife: auto
+    auto_halflife_atr_low: 4
+    auto_halflife_atr_high: 2
+
+  adaptive_sr:
+    method: swing_volume
+    min_sr_distance_atr: 0.2
+    min_touches: 1
+
+  hmm:
+    auto_select: true
+    warmup_bars: 200
+    min_history_download_bars: 500
+
+  kalman:
+    q_ratio: 0.02
+
+  regime:
+    confirm_bars: 4
+
+# -----------------------------------------------------------------------------
+# 风险参数覆盖 (精英激进)
+# -----------------------------------------------------------------------------
+risk:
+  risk_budget:
+    account_risk_per_trade: 0.02
+    min_risk_per_trade: 0.01
+    auto_risk_adjust: true
+    min_risk: 0.005
+
+  leverage:
+    max_leverage: 3.0
+    initial_leverage_cap: 2.0          # 首次开仓杠杆限制
+    max_total_delta: 3.0
+    max_single_symbol_exposure_pct: 0.5
+    max_single_order_notional_pct: 0.5
+    correlation_aware_exposure: true
+    correlation_threshold: 0.85
+    verify_exchange_limits: true
+
+  loss_limits:
+    max_daily_loss: 0.06
+    absolute_daily_loss_usd: 100
+    dynamic_loss_limit: false
+    max_consecutive_losses: 6
+    consecutive_losses_multiplier: 1.0
+    max_cooldown_minutes: 300
+    cool_down_rules:
+      loss_under_2pct: 20
+      loss_2_5pct: 60
+      loss_above_5pct: 180
+
+  profit_protection:
+    max_profit_drawdown: 0.50
+    hard_profit_drawdown: 0.70
+    profit_target_alert_pct: 0.25
+    profit_target:
+      enabled: true
+      threshold: 0.50
+      action: reduce_leverage
+    post_profit_cooldown_bars: 8       # 止盈后冷却
+    trend_strength_override:
+      enable: true
+      slope_threshold: 0.6
+      drawdown_override: 0.60
+      override_revoke: true
+
+  volatility_guard:
+    vol_guard_threshold_type: percentile
+    vol_guard_threshold: 0.90
+    vol_guard_reduce_factor: 0.9
+    vol_guard_min_leverage: 1.5
+    min_leverage_after_reduction: 1.5
+    restore_cooldown_hours: 24
+
+  liquidity:
+    max_spread_pct: 0.15
+    extreme_volatility_override: 0.18
+    min_24h_volume_btc: 80
+
+  cost_control:
+    net_risk_reward_ratio: 1.2
+    include_funding_cost: true
+    max_total_fee_pct_per_day: 0.03
+
+  position_management:
+    max_hold_bars: 500
+    max_hold_bars_auto_scale: true
+    max_consecutive_adds: 5
+    cool_down_after_max_adds: false
+    max_open_orders: 15
+    max_pending_stop_orders: 8
+    no_hedge_mode: true
+    allow_add_while_profitable: true
+
+  funding_rate_protection:
+    close_bars_before: 2
+    close_pct: 100
+    funding_rate_history_days: 3
+    funding_rate_estimate_fallback: use_conservative
+    allow_new_positions_during_funding: false
+
+  connection_risk:
+    loss_timeout_seconds: 90
+    on_disconnect: reduce_only
+    auto_restore_on_reconnect: true
+    restore_grace_period_sec: 10
+
+  black_swan:
+    detection:
+      single_day_move_pct: 25
+    stablecoin_depeg:
+      threshold_pct: 0.03
+      action: close_affected_positions
+
+  minimum_equity_usd: 800
+  warning_equity_usd: 1200
+
+  drawdown_halt:
+    enabled: true
+    threshold: 0.40
+
+  drawdown_auto_reduce_pct: 30
+
+  margin_call_protection:
+    enabled: true
+    action: reduce_positions
+    reduce_pct: 50
+
+  shadow_required: true
+  min_shadow_days: 5
+
+  panic_stop:
+    enabled: true
+    triggers: [extreme_slippage, system_overload, consecutive_losses: 5]
+
+  self_monitoring:
+    max_open_signals_per_hour: 20
+    strategy_circuit_breaker:
+      max_orders_per_min: 20
+      action: pause_trading
+
+  max_lifetime_trades: auto            # 基于净值计算
+  max_adds_per_day: 10
+  max_total_trades_per_day: 20
+
+# -----------------------------------------------------------------------------
+# 执行参数覆盖 (精英激进)
+# -----------------------------------------------------------------------------
+execution:
+  global:
+    default_order_type: market
+    small_account_force_limit: true    # 小账户强制限价单
+    fallback_timeout_sec: 15
+    prefer_maker: false
+    fallback_to_taker: true
+    dry_run_mode: false
+
+  slippage:
+    max_slippage_pct: 0.1
+    max_slippage_usd: 5               # 单笔滑点绝对上限
+    market_order_max_slippage_pct: 0.5
+    max_slippage_cost_per_trade_pct: 0.2
+    override_on_volatility: true
+
+  order_lifecycle:
+    timeout_sec: 15
+    max_open_orders: 15
+    reconciliation_interval_sec: 90
+    partial_fill:
+      timeout_sec: 5
+      action: cancel_remainder
+      if_remainder_above_ratio: 0.6
+    order_rejection:
+      retry_temporary: true
+      max_retries: 1
+      notify: true
+    ghost_order_policy: mark_cancelled
+
+  twap:
+    min_order_value_usd: 2000
+    max_duration_sec: 300
+    avoid_funding_period: false
+    stop_on_price_move_pct: 2.0
+
+  iceberg:
+    enabled: true
+
+  fee_optimizer:
+    max_wait_for_maker_sec: 10
+    adaptive_wait: false
+    spread_threshold_for_limit: 0.06
+
+  execution_risk:
+    market_order_max_slippage_pct: 0.5
+    circuit_breaker_for_market_orders:
+      enabled: true
+      price_change_pct_1min: 3.0
+    price_sanity_check:
+      enabled: true
+      max_deviation_pct: 10
+    trade_validation:
+      enabled: true
+    margin_adaptation:
+      auto_reduce_on_margin: true
+
+  verify_exchange_limits: true
+
+  offline_stop_protection:
+    enabled: true
+    sync_interval_sec: 45
+    sync_timeout_sec: 5
+    emergency_close_timeout_sec: 10
+
+  duplicate_order_protection:
+    enabled: true
+    window_sec: 5
+
+  rate_limit:
+    max_orders_per_second: 5
+    max_daily_orders: 50
+    max_cancels_per_day: 30
+
+  stop_order:
+    type: market
+    max_slippage_pct: 0.8
+
+  price_rounding: floor_for_buy_ceil_for_sell
+  qty_rounding: floor
+  skip_if_below_min_notional: false
+
+  symbol_status_check:
+    enabled: true
+    interval_sec: 10
+
+  high_latency_action: reduce_frequency
+  high_latency_reduce_factor: 0.5
+
+  cancel_all_on_extreme_move:
+    enabled: true
+    threshold_pct: 5
+
+  startup_order_policy: cancel_all_on_startup
+
+  time_jump_detection:
+    enabled: true
+    max_jump_sec: 5
+
+# -----------------------------------------------------------------------------
+# 数据源 (精英激进)
+# -----------------------------------------------------------------------------
+data_sources:
+  latency_based_selection: true
+  switch_cooldown_sec: 120
+  use_cached_price_on_failure: true
+  max_cache_age_sec: 60
+  quality:
+    gap_detection:
+      enabled: true
+      gap_action: mark_suspect
+  integrity:
+    max_missing_ratio: 0.04
+    notify_on_repair: false
+  clock_sync:
+    max_deviation_sec: 1.5
+    fallback_clock: system
+    alert_on_fallback: true
+    time_skew_compensation:
+      enabled: true
+  data_acquisition:
+    resume_download: true
+    initial_history_days: 5
+    download_rate_limit_rps: 10
+    respect_exchange_limit: true
+
+# -----------------------------------------------------------------------------
+# 进化模块 (激进但安全)
+# -----------------------------------------------------------------------------
+evolution:
+  global:
+    enabled: true
+    mode: shadow
+    auto_apply: false
+    kill_switch: true
+    max_allowed_dd_increase: 0.05
+  bapo:
+    enabled: true
+    schedule: weekly
+    min_trades: 20
+    min_account_balance_for_bapo: 5000
+    min_trades_adaptive: false
+  rl:
+    enabled: false
+  meta:
+    enabled: false
+  gan_stress:
+    enabled: true
+    schedule: monthly
+  online_tuning:
+    enabled: false
+
+# -----------------------------------------------------------------------------
+# 日志与审计
+# -----------------------------------------------------------------------------
+logging:
+  audit:
+    log_level: INFO
+    immutable_backend: database_chain
+  anomaly_log_level: WARNING
+  log_order_params: masked
+
+# -----------------------------------------------------------------------------
+# 通知
+# -----------------------------------------------------------------------------
+notifications:
+  channels: [log]
+  drawdown_alert_threshold_pct: 0.04
+  profit_target_alert_pct: 0.25
+
+# -----------------------------------------------------------------------------
+# 备份与存储
+# -----------------------------------------------------------------------------
+backup:
+  enabled: true
+  interval_hours: 12
+  retention_count: 10
+  path: /opt/khaos/backups
+
+storage:
+  retention:
+    audit_retention_days: 1825
+  order_archive:
+    retention_days: 365
+
+trade_snapshot_interval_min: 30
+
+# -----------------------------------------------------------------------------
+# 监控
+# -----------------------------------------------------------------------------
+metrics:
+  enabled: true
+  sampling_rate: 0.1
+  export: false
+
+live_stream:
+  enabled: true
+  local_only: true
+
+performance:
+  monitoring:
+    enabled: true
+    max_latency_ms: 150
+
+# -----------------------------------------------------------------------------
+# 安全加固
+# -----------------------------------------------------------------------------
+api_key_scope_check:
+  enabled: true
+  forbidden_scopes: [withdraw, margin, transfer]
+
+manual_order_policy:
+  require_confirmation_and_risk_check: true
+  max_manual_order_value_pct_of_equity: 5
+  manual_signal_priority: override
+
+delisting_protection:
+  on_delisting: close_position_and_alert
+  check_interval_hours: 2
+
+event_based_halt:
+  enabled: true
+  event_sources: [exchange_announcement, hard_fork]
+
+maintenance_action: close_only
+auto_resume_after_maintenance: true
+
+upgrade_policy: close_positions_and_stop
+
+alert_escalation: after_3_errors
+escalation_action: notify_admin_and_pause
+
+data_source_circuit_breaker:
+  max_errors_per_min: 20
+
+remote_trigger_endpoint: /api/panic
+
+param_change_grace_bars: 10
+
+max_concurrent_symbols: 3
+
+min_bandwidth_mbps: 1
+
+risk_param_lock:
+  enabled: false
+
+idle_resource_release_min: 30
+
+# -----------------------------------------------------------------------------
+# 绩效基准
+# -----------------------------------------------------------------------------
+benchmark:
+  max_drawdown_lt: 0.45
+  annual_return_gt: 0.30
+
+# -----------------------------------------------------------------------------
+# 灾难恢复与紧急操作
+# -----------------------------------------------------------------------------
+emergency_commands:
+  close_all_positions: "khaos panic --close-all"
+  stop_service: "systemctl stop khaos"
+
+disaster_recovery_note: "激进策略可能导致快速亏损，请确保备用资金充足，并定期监控。"
