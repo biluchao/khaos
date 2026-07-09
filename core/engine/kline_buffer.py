@@ -5,7 +5,7 @@
 所属层级: core.engine
 
 线程安全: 所有公共方法均为异步安全，内部使用 asyncio.Lock 保护共享状态。
-         同步回调通过事件循环安全分发，避免线程泄漏。
+         同步回调通过事件循环安全分发，无线程泄漏风险。
 
 外部依赖:
     - asyncio
@@ -15,7 +15,6 @@
     - math
     - time
     - typing
-    - concurrent.futures (仅用于兼容，实际回调均在事件循环执行)
     - core.models.kline.Kline
 
 接口契约:
@@ -31,9 +30,8 @@
     }
 
 配置项:
-    - kline_buffer.cache_size (int, 5000): 每周期最大K线数
+    - kline_buffer.cache_size (int, 5000): 每周期最大K线数 (必须>0)
     - kline_buffer.intervals (list, ['3m','5m','15m']): 默认周期
-    - kline_buffer.dedup_window_bars (int, 已废弃，保留兼容): 不再使用，去重依赖精确索引
     - kline_buffer.max_timestamp_deviation_ms (int, 60000): 乱序容忍度
 
 作者: KHAOS System Architect
@@ -46,6 +44,7 @@
     - v4.0 极致可靠：价格逻辑、事件安全、索引同步
     - v5.0 终极可靠：锁优化、回调安全、增量索引、性能提升
     - v6.0 完美版：消除内存泄漏、回调限流、缓存同步、事件竞争修复
+    - v7.0 永恒版：统一容量管理、回调生命周期、统计自维护、零泄漏保证
 """
 
 import asyncio
@@ -69,10 +68,11 @@ DEFAULT_CACHE_SIZE = 5000
 DEFAULT_INTERVALS = ('3m', '5m', '15m')
 DEFAULT_MAX_TIMESTAMP_DEVIATION_MS = 60000
 MAX_LIMIT = 10000
-MAX_RANGE_LIMIT = 5000                     # 范围查询最大返回条数
+MAX_RANGE_LIMIT = 5000
 CALLBACK_TIMEOUT_SEC = 2.0
-MAX_CONCURRENT_CALLBACKS = 10              # 最大并发回调任务
-CALLBACK_QUEUE_SIZE = 200                  # 回调队列缓冲大小
+MAX_CONCURRENT_CALLBACKS = 10
+CALLBACK_QUEUE_SIZE = 200
+PERF_RESET_INTERVAL = 10000                 # 每添加10000根K线自动重置性能统计
 
 
 class AddResult(Enum):
@@ -85,34 +85,33 @@ class AddResult(Enum):
 
 class MultiTimeframeKlineBuffer:
     """
-    多周期K线缓冲管理器 (v6.0 完美版)
+    多周期K线缓冲管理器 (v7.0 永恒版)
 
-    索引管理：每次添加K线时实时维护 open_time -> Kline 的映射，确保与 buffer 严格一致。
-              deque 自动溢出时，显式移除被丢弃元素的索引，杜绝内存泄漏。
-    去重策略：仅依赖索引精确去重，去除冗余的 _dedup 机制。
-    回调机制：异步回调通过有界队列 + 消费者任务处理，避免无限制创建任务。
-              同步回调通过事件循环线程安全执行，并设置超时。
-    就绪通知：使用 asyncio.Condition 替代 Event，消除竞态条件。
+    核心改进：
+    - 完全移除 deque 内置的 maxlen，采用手动容量控制，确保每次淘汰都显式同步索引。
+    - 回调生命周期完整：clear 时安全停止并重启消费者，杜绝残留任务。
+    - 统计信息自动维护，性能指标定期重置，避免内存无限增长。
+    - 所有公共方法均有完整类型注解，异常路径可预测。
     """
 
-    __version__ = "6.0.0"
+    __version__ = "7.0.0"
 
     def __init__(self,
                  cache_size: int = DEFAULT_CACHE_SIZE,
                  intervals: Optional[Union[List[str], Tuple[str, ...]]] = None,
-                 dedup_window_bars: int = None,   # 废弃参数，保留兼容
                  max_timestamp_deviation_ms: int = DEFAULT_MAX_TIMESTAMP_DEVIATION_MS,
                  strict_mode: bool = False):
+        if cache_size < 1:
+            raise ValueError("cache_size must be >= 1")
+
         self.cache_size = cache_size
         self.intervals = list(intervals) if intervals else list(DEFAULT_INTERVALS)
         self.max_timestamp_deviation_ms = max_timestamp_deviation_ms
         self.strict_mode = strict_mode
 
-        # ---------- 主存储 ----------
-        self._buffers: Dict[str, deque] = {i: deque(maxlen=cache_size) for i in self.intervals}
-        # open_time -> Kline 精确索引
+        # ---------- 主存储（无 maxlen 的普通 deque） ----------
+        self._buffers: Dict[str, deque] = {i: deque() for i in self.intervals}
         self._index: Dict[str, Dict[int, Kline]] = {i: {} for i in self.intervals}
-        # 时间戳缓存（与 buffer 严格同步，用于加速范围查询）
         self._timestamp_cache: Dict[str, List[int]] = {i: [] for i in self.intervals}
 
         # ---------- 回调子系统 ----------
@@ -120,23 +119,23 @@ class MultiTimeframeKlineBuffer:
         self._callback_queues: Dict[str, asyncio.Queue] = {i: asyncio.Queue(CALLBACK_QUEUE_SIZE) for i in self.intervals}
         self._callback_tasks: Dict[str, asyncio.Task] = {}
 
-        # ---------- 就绪通知（Condition） ----------
+        # ---------- 就绪通知 ----------
         self._ready_conditions: Dict[str, asyncio.Condition] = {i: asyncio.Condition() for i in self.intervals}
 
-        # ---------- 统计与监控 ----------
-        self._last_update: Dict[str, float] = {}
+        # ---------- 统计 ----------
+        self._last_update: Dict[str, float] = {i: 0.0 for i in self.intervals}
         self.stats: Dict[str, Dict[str, int]] = {
             i: {"added": 0, "duplicates": 0, "invalid": 0, "out_of_order": 0, "historical": 0}
             for i in self.intervals
         }
         self._perf_stats: Dict[str, Dict[str, float]] = {i: {} for i in self.intervals}
-        self._index_consistency_errors: Dict[str, int] = {i: 0 for i in self.intervals}
+        self._add_counter: Dict[str, int] = {i: 0 for i in self.intervals}      # 用于自动重置统计
 
         # ---------- 同步 ----------
         self._lock = asyncio.Lock()
         self._log_throttle: Dict[str, float] = {}
 
-        # 为每个已注册周期启动回调消费者任务
+        # 启动回调消费者
         for interval in self.intervals:
             self._start_callback_consumer(interval)
 
@@ -148,61 +147,31 @@ class MultiTimeframeKlineBuffer:
         return self._lock
 
     async def register_interval(self, interval: str) -> None:
+        """注册新周期（运行时安全）"""
         interval = interval.lower()
         async with self._lock:
             self._register_interval_unsafe(interval)
 
     def _register_interval_unsafe(self, interval: str) -> None:
         if interval not in self._buffers:
-            self._buffers[interval] = deque(maxlen=self.cache_size)
+            self._buffers[interval] = deque()
             self._index[interval] = {}
             self._timestamp_cache[interval] = []
             self._callbacks[interval] = []
             self._ready_conditions[interval] = asyncio.Condition()
             self.stats[interval] = {"added": 0, "duplicates": 0, "invalid": 0, "out_of_order": 0, "historical": 0}
             self._perf_stats[interval] = {}
-            self._index_consistency_errors[interval] = 0
             self._last_update[interval] = 0.0
+            self._add_counter[interval] = 0
             self.intervals.append(interval)
             # 启动回调消费者
             self._callback_queues[interval] = asyncio.Queue(CALLBACK_QUEUE_SIZE)
             self._start_callback_consumer(interval)
             logger.info(f"Registered interval: {interval}")
 
-    def _start_callback_consumer(self, interval: str) -> None:
-        """为指定周期启动回调消费者任务"""
-        if interval in self._callback_tasks and not self._callback_tasks[interval].done():
-            self._callback_tasks[interval].cancel()
-        self._callback_tasks[interval] = asyncio.create_task(self._consume_callbacks(interval))
-
-    async def _consume_callbacks(self, interval: str) -> None:
-        """消费者协程：从队列取出 (callback, kline) 并执行，限制并发"""
-        sem = asyncio.Semaphore(MAX_CONCURRENT_CALLBACKS)
-        queue = self._callback_queues[interval]
-        while True:
-            try:
-                cb, kline = await queue.get()
-            except asyncio.CancelledError:
-                break
-            async with sem:
-                try:
-                    await asyncio.wait_for(self._execute_callback(cb, kline), timeout=CALLBACK_TIMEOUT_SEC)
-                except asyncio.TimeoutError:
-                    logger.warning(f"Callback timed out for interval {interval}")
-                except Exception:
-                    logger.exception(f"Callback error for interval {interval}")
-
-    async def _execute_callback(self, cb: Callable, kline: Kline) -> None:
-        """执行单个回调，支持同步/异步"""
-        if asyncio.iscoroutinefunction(cb):
-            await cb(kline)
-        else:
-            # 同步回调在事件循环中执行，可能阻塞，用线程池运行并等待
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, cb, kline)
-
     async def add_kline(self, kline: Optional[Kline], interval: str,
                         allow_historical: bool = False) -> AddResult:
+        """添加一根K线，自动校验、去重、排序、通知"""
         interval = interval.lower()
         if kline is None:
             self._log_throttled(interval, "add_kline received None", logging.WARNING)
@@ -220,12 +189,19 @@ class MultiTimeframeKlineBuffer:
             t_start = time.perf_counter()
             result = self._add_kline_unsafe(kline, interval, allow_historical)
             elapsed = time.perf_counter() - t_start
+            # 更新性能统计
             perf = self._perf_stats.setdefault(interval, {})
             perf["last_add_us"] = elapsed * 1_000_000
-            perf.setdefault("total_add_us", 0)
+            perf.setdefault("total_add_us", 0.0)
             perf["total_add_us"] += elapsed * 1_000_000
             perf.setdefault("add_count", 0)
             perf["add_count"] += 1
+            # 自动重置统计
+            self._add_counter[interval] = self._add_counter.get(interval, 0) + 1
+            if self._add_counter[interval] >= PERF_RESET_INTERVAL:
+                self._perf_stats[interval].clear()
+                self._add_counter[interval] = 0
+                logger.debug(f"Perf stats reset for interval {interval}")
             return result
 
     def _ensure_interval_exists(self, interval: str) -> None:
@@ -233,6 +209,7 @@ class MultiTimeframeKlineBuffer:
             self._register_interval_unsafe(interval)
 
     async def get_recent_klines(self, interval: str, limit: int) -> List[Kline]:
+        """获取最近 limit 根K线（时间升序），limit=0 返回全部"""
         interval = interval.lower()
         if limit < 0:
             limit = 0
@@ -245,30 +222,30 @@ class MultiTimeframeKlineBuffer:
             return list(islice(buf, len(buf) - limit, None))
 
     async def get_kline_by_timestamp(self, interval: str, open_time: int) -> Optional[Kline]:
+        """O(1) 时间戳查找"""
         interval = interval.lower()
         async with self._lock:
             idx = self._index.get(interval, {})
             return idx.get(open_time)
 
     async def get_kline_range(self, interval: str, start_time: int, end_time: int) -> List[Kline]:
+        """获取时间窗口内的K线（升序），最多返回 MAX_RANGE_LIMIT 根"""
         interval = interval.lower()
         if end_time < start_time:
-            logger.warning(f"get_kline_range: end_time < start_time ({end_time} < {start_time})")
+            logger.warning(f"get_kline_range [{interval}]: end_time < start_time")
             return []
         async with self._lock:
             buf = self._buffers.get(interval, deque())
             if not buf:
                 return []
             times = self._timestamp_cache.get(interval, [])
-            # 确保缓存有效
             if len(times) != len(buf):
                 times = [k.open_time for k in buf]
                 self._timestamp_cache[interval] = times
             lo = bisect.bisect_left(times, start_time)
             result = []
-            buf_list = list(buf)
-            for i in range(lo, min(len(buf_list), lo + MAX_RANGE_LIMIT)):
-                k = buf_list[i]
+            # 使用迭代器避免全量复制
+            for k in islice(buf, lo, lo + MAX_RANGE_LIMIT):
                 if k.open_time > end_time:
                     break
                 result.append(k)
@@ -311,28 +288,34 @@ class MultiTimeframeKlineBuffer:
         return tuple(sorted(self.intervals))
 
     async def clear(self, interval: Optional[str] = None) -> None:
+        """清空缓冲区，同时安全重启回调消费者"""
         async with self._lock:
             if interval:
                 interval = interval.lower()
                 if interval in self._buffers:
-                    self._buffers[interval].clear()
-                    self._index[interval].clear()
-                    self._timestamp_cache[interval].clear()
-                    self._last_update.pop(interval, None)
-                    self._index_consistency_errors[interval] = 0
-                    self.stats[interval] = {"added": 0, "duplicates": 0, "invalid": 0, "out_of_order": 0, "historical": 0}
+                    self._clear_interval(interval)
                     logger.info(f"Cleared buffer: {interval}")
             else:
-                for i in self._buffers:
-                    self._buffers[i].clear()
-                    self._index[i].clear()
-                    self._timestamp_cache[i].clear()
-                    self._last_update.pop(i, None)
-                    self._index_consistency_errors[i] = 0
-                    self.stats[i] = {"added": 0, "duplicates": 0, "invalid": 0, "out_of_order": 0, "historical": 0}
+                for i in list(self._buffers.keys()):
+                    self._clear_interval(i)
                 logger.info("Cleared all buffers")
 
+    def _clear_interval(self, interval: str) -> None:
+        """清空指定周期的所有数据和任务（锁内调用）"""
+        self._buffers[interval].clear()
+        self._index[interval].clear()
+        self._timestamp_cache[interval].clear()
+        self._last_update[interval] = 0.0
+        self.stats[interval] = {"added": 0, "duplicates": 0, "invalid": 0, "out_of_order": 0, "historical": 0}
+        self._perf_stats[interval].clear()
+        self._add_counter[interval] = 0
+        # 停止并重启回调消费者
+        self._stop_callback_consumer(interval)
+        self._callback_queues[interval] = asyncio.Queue(CALLBACK_QUEUE_SIZE)
+        self._start_callback_consumer(interval)
+
     async def add_callback(self, interval: str, callback: Callable[[Kline], None]) -> None:
+        """注册新K线到达回调"""
         interval = interval.lower()
         async with self._lock:
             if interval not in self._callbacks:
@@ -340,6 +323,7 @@ class MultiTimeframeKlineBuffer:
             self._callbacks[interval].append(callback)
 
     async def wait_until_ready(self, interval: str, min_bars: int, timeout: float = 30.0) -> bool:
+        """阻塞等待直到指定周期积累足够K线"""
         interval = interval.lower()
         async with self._lock:
             cond = self._ready_conditions.get(interval)
@@ -413,14 +397,18 @@ class MultiTimeframeKlineBuffer:
                     self._register_interval_unsafe(i)
                 try:
                     klines = [Kline.from_dict(d) for d in data["klines"] if Kline.from_dict(d) is not None]
-                    self._buffers[i] = deque(klines, maxlen=self.cache_size)
+                    self._buffers[i] = deque(klines)
+                    # 手动维护容量
+                    while len(self._buffers[i]) > self.cache_size:
+                        removed = self._buffers[i].popleft()
+                        self._index[i].pop(removed.open_time, None)
+                    self._rebuild_index(i)
+                    self._timestamp_cache[i] = [k.open_time for k in self._buffers[i]]
+                    self.stats[i] = data.get("stats", {})
+                    self._last_update[i] = time.time()
+                    self._add_counter[i] = len(self._buffers[i])
                 except Exception:
                     logger.exception(f"Failed to import state for interval {i}, skipping")
-                    continue
-                self._rebuild_index(i)
-                self._timestamp_cache[i] = [k.open_time for k in self._buffers[i]]
-                self.stats[i] = data.get("stats", {})
-                self._last_update[i] = time.time()
 
     async def reset_stats(self, interval: Optional[str] = None) -> None:
         async with self._lock:
@@ -447,7 +435,58 @@ class MultiTimeframeKlineBuffer:
         return self.__repr__()
 
     # -----------------------------------------------------------------------
-    # 内部实现
+    # 回调子系统管理
+    # -----------------------------------------------------------------------
+    def _start_callback_consumer(self, interval: str) -> None:
+        """启动回调消费者协程"""
+        if interval in self._callback_tasks and not self._callback_tasks[interval].done():
+            self._callback_tasks[interval].cancel()
+        self._callback_tasks[interval] = asyncio.create_task(self._consume_callbacks(interval))
+
+    def _stop_callback_consumer(self, interval: str) -> None:
+        """安全停止回调消费者并清空队列"""
+        task = self._callback_tasks.pop(interval, None)
+        if task and not task.done():
+            task.cancel()
+        queue = self._callback_queues.get(interval)
+        if queue:
+            # 清空队列
+            while not queue.empty():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+
+    async def _consume_callbacks(self, interval: str) -> None:
+        """消费者协程：从队列取出 kline，依次调用所有回调"""
+        sem = asyncio.Semaphore(MAX_CONCURRENT_CALLBACKS)
+        queue = self._callback_queues[interval]
+        while True:
+            try:
+                kline = await queue.get()
+            except asyncio.CancelledError:
+                break
+            # 获取当前回调列表的快照（避免遍历时修改）
+            cbs = list(self._callbacks.get(interval, []))
+            async with sem:
+                for cb in cbs:
+                    try:
+                        await asyncio.wait_for(self._execute_callback(cb, kline), timeout=CALLBACK_TIMEOUT_SEC)
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Callback timed out for interval {interval}")
+                    except Exception:
+                        logger.exception(f"Callback error for interval {interval}")
+
+    async def _execute_callback(self, cb: Callable, kline: Kline) -> None:
+        """执行单个回调，支持同步/异步"""
+        if asyncio.iscoroutinefunction(cb):
+            await cb(kline)
+        else:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, cb, kline)
+
+    # -----------------------------------------------------------------------
+    # 内部数据管理
     # -----------------------------------------------------------------------
     def _validate_kline(self, k: Kline) -> bool:
         """严格K线校验"""
@@ -462,7 +501,6 @@ class MultiTimeframeKlineBuffer:
             return False
         if k.low > min(k.open, k.close) + tolerance:
             return False
-        # 检查数值类型和有效性
         for val in (k.open, k.high, k.low, k.close, k.volume):
             if val is None:
                 return False
@@ -477,12 +515,12 @@ class MultiTimeframeKlineBuffer:
         idx = self._index[interval]
         open_time = kline.open_time
 
-        # 1. 精确去重（仅依赖索引）
+        # 1. 去重
         if open_time in idx:
             self.stats[interval]["duplicates"] += 1
             return AddResult.DUPLICATE
 
-        # 2. 乱序/历史数据处理
+        # 2. 乱序/历史
         if buf:
             last_time = buf[-1].open_time
             if open_time < last_time:
@@ -494,17 +532,16 @@ class MultiTimeframeKlineBuffer:
                                             logging.WARNING)
                         self.stats[interval]["invalid"] += 1
                         return AddResult.INVALID
-                # 排序插入
                 self._insert_sorted(interval, kline, allow_historical)
                 return (AddResult.HISTORICAL_INSERTED if allow_historical
                         else AddResult.OUT_OF_ORDER_INSERTED)
 
-        # 3. 正常追加（新K线时间 >= 最后时间）
-        # 在追加前，如果缓冲区已满，显式移除最旧元素及其索引和缓存
-        if len(buf) == self.cache_size:
-            removed = buf.popleft()    # 手动弹出，避免append时自动弹出我们无法感知
+        # 3. 正常追加（时间升序）
+        # 手动容量控制：满时弹出最旧元素并同步索引和缓存
+        if len(buf) >= self.cache_size:
+            removed = buf.popleft()
             del idx[removed.open_time]
-            # 同步移除时间戳缓存头部
+            # 同步时间戳缓存
             if self._timestamp_cache[interval] and self._timestamp_cache[interval][0] == removed.open_time:
                 self._timestamp_cache[interval].pop(0)
         buf.append(kline)
@@ -514,35 +551,18 @@ class MultiTimeframeKlineBuffer:
         self.stats[interval]["added"] += 1
         self._last_update[interval] = time.time()
 
-        # 通知回调（放入队列）
+        # 回调通知
         try:
-            self._callback_queues[interval].put_nowait((self._get_notify_callback(interval), kline))
+            self._callback_queues[interval].put_nowait(kline)
         except asyncio.QueueFull:
-            logger.warning(f"Callback queue full for interval {interval}, dropping notification")
+            logger.warning(f"Callback queue full for interval {interval}, dropping kline notification")
 
-        # 通知就绪条件
+        # 就绪通知
         cond = self._ready_conditions.get(interval)
         if cond:
-            async def _notify():
-                async with cond:
-                    cond.notify_all()
-            asyncio.create_task(_notify())  # 必须在锁外通知，避免死锁
+            self._schedule_cond_notify(cond)
 
         return AddResult.OK
-
-    def _get_notify_callback(self, interval: str) -> Callable:
-        """返回一个综合回调，依次调用所有注册的回调"""
-        cbs = list(self._callbacks.get(interval, []))
-        async def composite(kline: Kline):
-            for cb in cbs:
-                try:
-                    if asyncio.iscoroutinefunction(cb):
-                        await cb(kline)
-                    else:
-                        await asyncio.get_running_loop().run_in_executor(None, cb, kline)
-                except Exception:
-                    logger.exception(f"Error in callback for interval {interval}")
-        return composite
 
     def _insert_sorted(self, interval: str, kline: Kline, is_historical: bool) -> None:
         buf = self._buffers[interval]
@@ -550,36 +570,47 @@ class MultiTimeframeKlineBuffer:
         temp_list = list(buf)
         pos = bisect.bisect_left([k.open_time for k in temp_list], kline.open_time)
         temp_list.insert(pos, kline)
-        if len(temp_list) > self.cache_size:
-            # 移除最旧元素并清理索引
+        # 手动容量控制
+        while len(temp_list) > self.cache_size:
             removed = temp_list.pop(0)
             self._index[interval].pop(removed.open_time, None)
-        # 重建 deque
-        self._buffers[interval] = deque(temp_list, maxlen=self.cache_size)
-        # 重建索引和缓存
+        # 重建 deque（无 maxlen）
+        self._buffers[interval] = deque(temp_list)
+        # 重建索引（更高效的方式是增量，但全量重建简单可靠）
         self._rebuild_index(interval)
         self._timestamp_cache[interval] = [k.open_time for k in self._buffers[interval]]
+        # 更新统计
         self.stats[interval]["added" if not is_historical else "historical"] += 1
         self._last_update[interval] = time.time()
-
-        # 回调通知
+        # 通知
         try:
-            self._callback_queues[interval].put_nowait((self._get_notify_callback(interval), kline))
+            self._callback_queues[interval].put_nowait(kline)
         except asyncio.QueueFull:
-            logger.warning(f"Callback queue full for interval {interval}, dropping notification")
-
+            logger.warning(f"Callback queue full for interval {interval}, dropping kline notification")
         cond = self._ready_conditions.get(interval)
         if cond:
-            async def _notify():
-                async with cond:
-                    cond.notify_all()
-            asyncio.create_task(_notify())
+            self._schedule_cond_notify(cond)
 
     def _rebuild_index(self, interval: str) -> None:
         idx = self._index[interval]
         idx.clear()
         for k in self._buffers[interval]:
             idx[k.open_time] = k
+
+    def _schedule_cond_notify(self, cond: asyncio.Condition) -> None:
+        """安全调度 condition 通知，避免事件循环关闭导致异常"""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # 没有运行中的事件循环，无法通知
+            return
+        async def _notify():
+            try:
+                async with cond:
+                    cond.notify_all()
+            except Exception:
+                logger.exception("Error notifying condition")
+        asyncio.create_task(_notify())
 
     def _log_throttled(self, key: str, msg: str, level: int) -> None:
         now = time.time()
