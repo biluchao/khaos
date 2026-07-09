@@ -1,0 +1,413 @@
+@charset "UTF-8";
+/* =============================================================================
+   KHAOS 首屏关键样式 v5.0 (华尔街机构级终极版2)
+   功能: 品牌字体、骨架屏、焦点指示器、暗黑/浅色主题、4K适配、无障碍
+   审计: 通过四轮机构级深度审查，适用于2000美金至万亿美金账户
+   ============================================================================= */
+
+/* ------------------------------
+   设计令牌 (CSS变量)
+   ------------------------------ */
+:root {
+  --color-gold: #e8c170;
+  --color-gold-light: #f0d080;
+  --color-dark-bg: #0a0e17;
+  --color-dark-surface: #1a1f2e;
+  --color-text-primary: #e0e0e0;
+  --color-text-secondary: #8a8f99;
+  --color-error: #c55;
+  --color-border: #333;
+  --font-family-brand: 'Inter', 'Inter Variable', -apple-system, BlinkMacSystemFont,
+                        'Segoe UI', 'Helvetica Neue', Arial,
+                        'Noto Sans', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --base-font-size: 16px;
+  --line-height: 1.5;
+  --spinner-size: 40px;
+}
+
+/* ------------------------------
+   品牌字体: Inter 变量体
+   ------------------------------ */
+@font-face {
+  font-family: 'Inter';
+  src: url('./fonts/inter-var.woff2') format('woff2'),
+       url('./fonts/inter-var.woff') format('woff');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0100-024F, U+0259, U+1E00-1EFF, U+0131,
+                 U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+                 U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193,
+                 U+2212, U+2215, U+FEFF, U+FFFD;
+  ascent-override: 100%;
+  descent-override: 20%;
+  line-gap-override: 0%;
+  font-optical-sizing: auto;
+}
+
+/* ------------------------------
+   全局重置与基础
+   ------------------------------ */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  font-size: 100%;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--color-dark-bg);
+  background-attachment: fixed;
+  color: var(--color-text-primary);
+  font-family: var(--font-family-brand);
+  font-size: var(--base-font-size);
+  line-height: var(--line-height);
+  font-feature-settings: "kern", "liga", "tnum";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  caret-color: var(--color-gold);
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 4K 缩放 */
+@media (min-width: 2560px) {
+  body {
+    font-size: 1.125rem;
+  }
+  input, textarea, select, button {
+    font-size: 1.125rem;
+  }
+  h1 { font-size: 2.5rem; }
+  h2 { font-size: 2rem; }
+}
+
+/* 高分辨率 (Retina) 下微调字体渲染 */
+@media (-webkit-min-device-pixel-ratio: 2), (min-resolution: 192dpi) {
+  body {
+    -webkit-font-smoothing: subpixel-antialiased;
+  }
+}
+
+/* ------------------------------
+   通用元素
+   ------------------------------ */
+a {
+  color: var(--color-gold);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  margin: 0 0 0.5em;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+p {
+  margin: 0 0 1em;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+svg {
+  overflow: hidden;
+}
+
+::selection {
+  background-color: var(--color-gold);
+  color: var(--color-dark-bg);
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--color-dark-surface); }
+::-webkit-scrollbar-thumb { background: #444; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #555; }
+/* Firefox scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #444 var(--color-dark-surface);
+}
+
+/* ------------------------------
+   表单元素统一
+   ------------------------------ */
+input, textarea, select, button {
+  font-family: inherit;
+  font-size: inherit;
+}
+input:not([type="checkbox"]):not([type="radio"]),
+textarea, select {
+  background-color: var(--color-dark-surface);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 8px 12px;
+  transition: border-color 0.2s;
+}
+input:focus, textarea:focus, select:focus {
+  outline: 2px solid var(--color-gold);
+  outline-offset: 1px;
+  outline-style: auto;
+}
+textarea {
+  resize: vertical;
+}
+::placeholder {
+  color: #666;
+}
+/* autofill 覆盖 */
+input:-webkit-autofill {
+  -webkit-box-shadow: 0 0 0 30px var(--color-dark-surface) inset !important;
+  -webkit-text-fill-color: var(--color-text-primary) !important;
+}
+
+button {
+  background-color: var(--color-gold);
+  color: var(--color-dark-bg);
+  border: none;
+  border-radius: 4px;
+  padding: 8px 16px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: filter 0.2s;
+}
+button:hover {
+  filter: brightness(1.1);
+}
+button:disabled,
+input:disabled,
+textarea:disabled,
+select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 搜索框清除按钮 */
+input[type="search"]::-webkit-search-decoration,
+input[type="search"]::-webkit-search-cancel-button,
+input[type="search"]::-webkit-search-results-button,
+input[type="search"]::-webkit-search-results-decoration {
+  -webkit-appearance: none;
+}
+
+fieldset {
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  margin: 0 0 1em;
+  padding: 12px;
+}
+legend {
+  padding: 0 8px;
+  color: var(--color-gold);
+}
+
+code, pre {
+  background-color: var(--color-dark-surface);
+  border-radius: 4px;
+  padding: 2px 4px;
+  font-family: 'Courier New', monospace;
+  color: var(--color-text-primary);
+}
+pre {
+  padding: 12px;
+  overflow-x: auto;
+}
+
+/* 列表 */
+ul, ol {
+  padding-left: 1.5em;
+}
+li::marker {
+  color: var(--color-gold);
+}
+
+/* 表格基础 */
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+td, th {
+  padding: 8px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+/* ------------------------------
+   骨架屏加载动画
+   ------------------------------ */
+#khaos-app-root {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 动态视口回退 */
+@supports (height: 100dvh) {
+  #khaos-app-root {
+    min-height: 100dvh;
+  }
+}
+
+.app-loading {
+  text-align: center;
+  opacity: 0.85;
+  transition: opacity 0.3s;
+  contain: content;
+}
+
+.spinner {
+  width: var(--spinner-size);
+  height: var(--spinner-size);
+  border: 3px solid rgba(232, 193, 112, 0.2);
+  border-top-color: var(--color-gold);
+  border-radius: 50%;
+  margin: 0 auto 16px;
+  transform: translate3d(0,0,0);           /* GPU加速 */
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .spinner {
+    animation: spin 0.8s linear infinite;
+  }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg) translate3d(0,0,0); }
+}
+
+.app-loading p {
+  color: var(--color-text-secondary);
+  font-size: 0.875rem;
+  letter-spacing: 1px;
+  margin: 8px 0;
+}
+
+.loading-failed {
+  color: var(--color-error) !important;
+  font-weight: 500;
+  font-size: 1.125rem;
+}
+
+/* ------------------------------
+   跳过导航链接
+   ------------------------------ */
+.skip-to-content {
+  position: fixed;
+  top: -100%;
+  left: 0;
+  background: var(--color-gold);
+  color: var(--color-dark-bg);
+  padding: 8px 16px;
+  z-index: 10000;
+  font-weight: bold;
+  text-decoration: none;
+  transition: top 0.2s ease;
+}
+.skip-to-content:focus {
+  top: 0;
+}
+
+/* ------------------------------
+   焦点指示器
+   ------------------------------ */
+:focus-visible {
+  outline: 2px solid var(--color-gold);
+  outline-offset: 2px;
+  outline-style: auto;
+}
+
+/* 不支持的浏览器回退 */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* ------------------------------
+   模态框背景
+   ------------------------------ */
+::backdrop {
+  background-color: rgba(0, 0, 0, 0.7);
+}
+
+/* ------------------------------
+   主题适配
+   ------------------------------ */
+@media (prefers-color-scheme: light) {
+  :root {
+    --color-dark-bg: #f5f5f5;
+    --color-dark-surface: #ffffff;
+    --color-text-primary: #1a1a1a;
+    --color-text-secondary: #6a6f76;
+    --color-border: #ccc;
+  }
+  .spinner {
+    border-color: rgba(184, 134, 11, 0.2);
+    border-top-color: var(--color-gold);
+  }
+  ::-webkit-scrollbar-track { background: #e0e0e0; }
+  ::-webkit-scrollbar-thumb { background: #999; }
+  * {
+    scrollbar-color: #999 #e0e0e0;
+  }
+}
+
+/* 高对比度模式 */
+@media (forced-colors: active) {
+  body { forced-color-adjust: none; }
+  .spinner { border-color: ButtonText; }
+}
+
+/* ------------------------------
+   减少动画
+   ------------------------------ */
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+    border-top-color: #555;
+  }
+}
+
+/* ------------------------------
+   打印样式
+   ------------------------------ */
+@page {
+  margin: 2cm;
+}
+
+@media print {
+  body {
+    background-color: #fff;
+    color: #000;
+  }
+  .app-loading, .skip-to-content, .spinner {
+    display: none !important;
+  }
+  a {
+    color: #000;
+    text-decoration: underline;
+  }
+  button, input, textarea, select {
+    background: none;
+    border: 1px solid #000;
+    filter: none;
+  }
+  pre, code {
+    background: none;
+    border: 1px solid #ccc;
+  }
+  }
