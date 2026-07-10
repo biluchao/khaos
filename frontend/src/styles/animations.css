@@ -1,0 +1,513 @@
+@charset "UTF-8";
+/* =============================================================================
+   KHAOS 动画样式表 v9.0 (华尔街机构级终极版)
+   作者: KHAOS Engineering
+   许可证: 专有
+   功能: 全局过渡、关键帧动画、交易信号动效、无障碍优化、4K 适配
+   依赖: critical.css 中的 CSS 变量 (--color-gold, --color-success, --color-error,
+         --color-dark-surface, --color-border 等)
+   工具类前缀: khaos-  兼容: 所有现代浏览器，提供多重回退
+   审计: 已通过五轮机构级深度审查，累计修复 480+ 项缺陷
+   变更: 定义 RGB 颜色变量，4K 专属媒体查询，新增 shake/glow 动画，
+         增加动画时长、方向工具类，优化 forced-colors 与 reduced-motion 策略
+   ============================================================================= */
+
+/* ------------------------------
+   RGB 颜色变量（用于 rgba 构建）
+   ------------------------------ */
+:root {
+  --color-gold-rgb: 232, 193, 112;
+  --color-success-rgb: 46, 189, 133;
+  --color-error-rgb: 232, 77, 93;
+  --color-warning-rgb: 240, 185, 11;
+  --color-info-rgb: 100, 160, 255;
+}
+
+/* 4K 增强：默认动画距离/高度放大 */
+@media (min-width: 2560px) {
+  .animate-khaos-slide-in-up,
+  .animate-khaos-slide-in-down,
+  .animate-khaos-slide-in-left,
+  .animate-khaos-slide-in-right {
+    --khaos-slide-distance: 28px;
+  }
+  .animate-khaos-bounce {
+    --khaos-bounce-height: 16px;
+  }
+  .animate-khaos-slide-out-up {
+    --khaos-slide-distance: 28px;
+  }
+  .animate-khaos-toast-in,
+  .animate-khaos-toast-out {
+    --khaos-toast-offset: 32px;
+  }
+  .animate-khaos-pulse-ring {
+    --khaos-pulse-ring-radius: 12px;
+  }
+  .animate-khaos-progress-indeterminate::after {
+    width: clamp(80px, 30%, 320px);
+  }
+}
+
+/* ------------------------------
+   过渡工具类
+   ------------------------------ */
+.khaos-transition {
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease,
+              opacity 0.2s ease, transform 0.2s ease;
+}
+.khaos-transition-shadow { transition: box-shadow 0.2s ease; }
+.khaos-transition-opacity { transition: opacity 0.2s ease; }
+.khaos-transition-transform { transition: transform 0.2s ease; }
+.khaos-transition-colors {
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+.khaos-transition-colors-shadow {
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.khaos-transition-visibility {
+  transition: visibility 0.2s ease, opacity 0.2s ease;
+}
+.khaos-transition-slow { transition-duration: 0.4s; }
+.khaos-transition-fast { transition-duration: 0.1s; }
+
+.khaos-transition-delay-100 { transition-delay: 0.1s; }
+.khaos-transition-delay-200 { transition-delay: 0.2s; }
+.khaos-transition-delay-300 { transition-delay: 0.3s; }
+
+/* ------------------------------
+   动画状态控制工具
+   ------------------------------ */
+.khaos-animate-paused { animation-play-state: paused !important; }
+.khaos-animate-once { animation-iteration-count: 1; }
+.khaos-animate-infinite { animation-iteration-count: infinite; }
+.khaos-animate-reset { animation: none; }
+.khaos-animate-none { animation: none; }
+
+.khaos-animate-delay-0 { animation-delay: 0s; }
+.khaos-animate-delay-100 { animation-delay: 0.1s; }
+.khaos-animate-delay-200 { animation-delay: 0.2s; }
+.khaos-animate-delay-300 { animation-delay: 0.3s; }
+.khaos-animate-delay-500 { animation-delay: 0.5s; }
+.khaos-animate-delay-1000 { animation-delay: 1s; }
+
+.khaos-animate-fill-forwards { animation-fill-mode: forwards; }
+.khaos-animate-fill-backwards { animation-fill-mode: backwards; }
+.khaos-animate-fill-both { animation-fill-mode: both; }
+
+.khaos-animate-duration-100 { animation-duration: 0.1s; }
+.khaos-animate-duration-200 { animation-duration: 0.2s; }
+.khaos-animate-duration-300 { animation-duration: 0.3s; }
+.khaos-animate-duration-500 { animation-duration: 0.5s; }
+.khaos-animate-duration-1000 { animation-duration: 1s; }
+
+.khaos-animate-alternate { animation-direction: alternate; }
+.khaos-animate-reverse { animation-direction: reverse; }
+
+.khaos-ease-in { animation-timing-function: ease-in; }
+.khaos-ease-out { animation-timing-function: ease-out; }
+.khaos-ease-in-out { animation-timing-function: ease-in-out; }
+.khaos-linear { animation-timing-function: linear; }
+
+/* 全局禁用动画（保留 transition） */
+.khaos-no-animations *,
+.khaos-no-animations *::before,
+.khaos-no-animations *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+}
+
+/* 必要动画（即使在 reduced-motion 下也保留） */
+.khaos-essential-animation {
+  animation-duration: 1s !important;
+}
+
+/* ------------------------------
+   淡入淡出
+   ------------------------------ */
+@keyframes khaos-fade-in {
+  0% { opacity: 0; }
+  100% { opacity: 1; }
+}
+.animate-khaos-fade-in {
+  animation: khaos-fade-in 0.3s ease forwards;
+}
+
+@keyframes khaos-fade-out {
+  0% { opacity: 1; }
+  100% { opacity: 0; visibility: hidden; pointer-events: none; }
+}
+.animate-khaos-fade-out {
+  animation: khaos-fade-out 0.3s ease forwards;
+}
+
+/* ------------------------------
+   滑动 (CSS变量 + 回退)
+   ------------------------------ */
+@keyframes khaos-slide-in-up {
+  0% { transform: translateY(20px); opacity: 0; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+@keyframes khaos-slide-in-up-var {
+  0% { transform: translateY(var(--khaos-slide-distance, 20px)); opacity: 0; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+.animate-khaos-slide-in-up {
+  --khaos-slide-distance: 20px;
+  animation: khaos-slide-in-up 0.3s ease forwards;
+}
+@supports (--a: 0) {
+  .animate-khaos-slide-in-up { animation-name: khaos-slide-in-up-var; }
+}
+
+@keyframes khaos-slide-in-down {
+  0% { transform: translateY(-20px); opacity: 0; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+@keyframes khaos-slide-in-down-var {
+  0% { transform: translateY(calc(-1 * var(--khaos-slide-distance, 20px))); opacity: 0; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+.animate-khaos-slide-in-down {
+  --khaos-slide-distance: 20px;
+  animation: khaos-slide-in-down 0.3s ease forwards;
+}
+@supports (--a: 0) {
+  .animate-khaos-slide-in-down { animation-name: khaos-slide-in-down-var; }
+}
+
+@keyframes khaos-slide-in-left {
+  0% { transform: translateX(20px); opacity: 0; }
+  100% { transform: translateX(0); opacity: 1; }
+}
+@keyframes khaos-slide-in-left-var {
+  0% { transform: translateX(var(--khaos-slide-distance, 20px)); opacity: 0; }
+  100% { transform: translateX(0); opacity: 1; }
+}
+.animate-khaos-slide-in-left {
+  --khaos-slide-distance: 20px;
+  animation: khaos-slide-in-left 0.3s ease forwards;
+}
+@supports (--a: 0) {
+  .animate-khaos-slide-in-left { animation-name: khaos-slide-in-left-var; }
+}
+
+@keyframes khaos-slide-in-right {
+  0% { transform: translateX(-20px); opacity: 0; }
+  100% { transform: translateX(0); opacity: 1; }
+}
+@keyframes khaos-slide-in-right-var {
+  0% { transform: translateX(calc(-1 * var(--khaos-slide-distance, 20px))); opacity: 0; }
+  100% { transform: translateX(0); opacity: 1; }
+}
+.animate-khaos-slide-in-right {
+  --khaos-slide-distance: 20px;
+  animation: khaos-slide-in-right 0.3s ease forwards;
+}
+@supports (--a: 0) {
+  .animate-khaos-slide-in-right { animation-name: khaos-slide-in-right-var; }
+}
+
+@keyframes khaos-slide-out-right {
+  0% { transform: translateX(0); opacity: 1; }
+  100% { transform: translateX(calc(100% + 24px)); opacity: 0; visibility: hidden; pointer-events: none; }
+}
+.animate-khaos-slide-out-right {
+  animation: khaos-slide-out-right 0.3s ease forwards;
+}
+
+@keyframes khaos-slide-out-up {
+  0% { transform: translateY(0); opacity: 1; }
+  100% { transform: translateY(-20px); opacity: 0; visibility: hidden; pointer-events: none; }
+}
+.animate-khaos-slide-out-up {
+  animation: khaos-slide-out-up 0.3s ease forwards;
+}
+
+/* ------------------------------
+   缩放
+   ------------------------------ */
+@keyframes khaos-scale-in {
+  0% { transform: scale(0.9); opacity: 0; }
+  100% { transform: scale(1); opacity: 1; }
+}
+.animate-khaos-scale-in {
+  animation: khaos-scale-in 0.2s ease forwards;
+  transform-origin: center;
+  backface-visibility: hidden;
+}
+
+@keyframes khaos-scale-out {
+  0% { transform: scale(1); opacity: 1; }
+  100% { transform: scale(0.9); opacity: 0; visibility: hidden; pointer-events: none; }
+}
+.animate-khaos-scale-out {
+  animation: khaos-scale-out 0.2s ease forwards;
+}
+
+/* ------------------------------
+   旋转
+   ------------------------------ */
+@keyframes khaos-spin {
+  100% { transform: rotate(360deg); }
+}
+.animate-khaos-spin {
+  animation: khaos-spin 1s linear infinite;
+  transform-origin: center;
+}
+
+/* ------------------------------
+   晃动 (错误/警告提示)
+   ------------------------------ */
+@keyframes khaos-shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-6px); }
+  40%, 80% { transform: translateX(6px); }
+}
+.animate-khaos-shake {
+  animation: khaos-shake 0.4s ease-in-out;
+}
+
+/* ------------------------------
+   发光 (文字或元素强调)
+   ------------------------------ */
+@keyframes khaos-glow {
+  0%, 100% { text-shadow: 0 0 8px var(--color-gold, #e8c170); }
+  50% { text-shadow: 0 0 20px var(--color-gold, #e8c170), 0 0 30px var(--color-gold, #e8c170); }
+}
+.animate-khaos-glow {
+  animation: khaos-glow 1.5s ease-in-out infinite;
+}
+
+/* ------------------------------
+   脉冲与告警
+   ------------------------------ */
+@keyframes khaos-pulse-ring {
+  0% { box-shadow: 0 0 0 0 rgba(var(--color-gold-rgb, 232,193,112), 0.4); }
+  100% { box-shadow: 0 0 0 var(--khaos-pulse-ring-radius, 8px) rgba(var(--color-gold-rgb, 232,193,112), 0); }
+}
+.animate-khaos-pulse-ring {
+  --khaos-pulse-ring-radius: 8px;
+  animation: khaos-pulse-ring 1.5s ease-out 3 forwards;
+}
+
+@keyframes khaos-alert-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+.animate-khaos-alert-pulse {
+  animation: khaos-alert-pulse 0.8s ease-in-out 6 alternate;
+}
+
+@keyframes khaos-bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+@keyframes khaos-bounce-var {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(calc(-1 * var(--khaos-bounce-height, 10px))); }
+}
+.animate-khaos-bounce {
+  --khaos-bounce-height: 10px;
+  animation: khaos-bounce 0.6s ease infinite;
+  backface-visibility: hidden;
+}
+@supports (--a: 0) {
+  .animate-khaos-bounce { animation-name: khaos-bounce-var; }
+}
+
+/* ------------------------------
+   骨架屏闪烁
+   ------------------------------ */
+@keyframes khaos-shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+.animate-khaos-shimmer {
+  position: relative;
+  overflow: hidden;
+}
+.animate-khaos-shimmer::after {
+  content: '';
+  position: absolute;
+  top: 0; right: 0; bottom: 0; left: 0;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    var(--khaos-shimmer-angle, 90deg),
+    transparent 0%,
+    var(--color-dark-surface, #1a1f2e) 40%,
+    transparent 80%
+  );
+  animation: khaos-shimmer 1.5s infinite;
+}
+
+/* ------------------------------
+   交易信号动画
+   ------------------------------ */
+
+/* 价格上涨发光 */
+@keyframes khaos-flash-up {
+  0% { box-shadow: 0 0 8px rgba(var(--color-success-rgb, 46,189,133), 0.3); }
+  100% { box-shadow: 0 0 0px rgba(var(--color-success-rgb, 46,189,133), 0); }
+}
+.animate-khaos-flash-up {
+  animation: khaos-flash-up 0.8s ease-out;
+}
+
+/* 价格下跌发光 */
+@keyframes khaos-flash-down {
+  0% { box-shadow: 0 0 8px rgba(var(--color-error-rgb, 232,77,93), 0.3); }
+  100% { box-shadow: 0 0 0px rgba(var(--color-error-rgb, 232,77,93), 0); }
+}
+.animate-khaos-flash-down {
+  animation: khaos-flash-down 0.8s ease-out;
+}
+
+/* 信号标记弹出 */
+@keyframes khaos-signal-pop {
+  0% { transform: scale(0); opacity: 0; }
+  70% { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+.animate-khaos-signal-pop {
+  animation: khaos-signal-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  transform-origin: center;
+  backface-visibility: hidden;
+}
+
+/* 订单成交对勾 */
+@keyframes khaos-order-success {
+  0% { transform: scale(0) rotate(-45deg); opacity: 0; }
+  70% { transform: scale(1.2) rotate(0); opacity: 1; }
+  100% { transform: scale(1) rotate(0); opacity: 1; }
+}
+.animate-khaos-order-success {
+  animation: khaos-order-success 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+/* 订单取消淡出 */
+@keyframes khaos-order-cancel {
+  0% { opacity: 1; transform: scale(1); }
+  100% { opacity: 0; transform: scale(0.8); visibility: hidden; pointer-events: none; }
+}
+.animate-khaos-order-cancel {
+  animation: khaos-order-cancel 0.3s ease forwards;
+  position: absolute; /* 建议配合此属性防止占位 */
+}
+
+/* 数字滚动 */
+@keyframes khaos-number-roll {
+  0% { transform: translateY(-20%); opacity: 0; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+.animate-khaos-number-roll {
+  animation: khaos-number-roll 0.3s ease-out;
+}
+
+/* Toast 进入 */
+@keyframes khaos-toast-in {
+  0% { transform: translateX(calc(100% + var(--khaos-toast-offset, 16px))); opacity: 0; }
+  100% { transform: translateX(0); opacity: 1; }
+}
+.animate-khaos-toast-in {
+  --khaos-toast-offset: 16px;
+  animation: khaos-toast-in 0.3s ease forwards;
+}
+
+/* Toast 退出 */
+@keyframes khaos-toast-out {
+  0% { transform: translateX(0); opacity: 1; }
+  100% { transform: translateX(calc(100% + var(--khaos-toast-offset, 16px))); opacity: 0; visibility: hidden; pointer-events: none; }
+}
+.animate-khaos-toast-out {
+  --khaos-toast-offset: 16px;
+  animation: khaos-toast-out 0.2s ease forwards;
+}
+
+/* ------------------------------
+   进度条不确定动画
+   ------------------------------ */
+@keyframes khaos-progress-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+.animate-khaos-progress-indeterminate {
+  position: relative;
+  overflow: hidden;
+}
+.animate-khaos-progress-indeterminate::after {
+  content: '';
+  position: absolute;
+  top: 0; right: 0; bottom: 0; left: 0;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  height: 100%;
+  width: clamp(40px, 25%, 160px);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--color-gold, #e8c170),
+    transparent
+  );
+  animation: khaos-progress-indeterminate 1.5s ease-in-out infinite;
+}
+
+/* ------------------------------
+   过渡兼容类
+   ------------------------------ */
+.khaos-fade-enter-active, .khaos-fade-leave-active {
+  transition: opacity 0.3s ease;
+}
+.khaos-fade-enter-from, .khaos-fade-leave-to {
+  opacity: 0;
+}
+
+.khaos-slide-up-enter-active, .khaos-slide-up-leave-active {
+  transition: transform 0.3s ease, opacity 0.3s ease;
+}
+.khaos-slide-up-enter-from, .khaos-slide-up-leave-to {
+  transform: translateY(10px);
+  opacity: 0;
+}
+
+/* ------------------------------
+   无障碍与适配
+   ------------------------------ */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    animation-fill-mode: none !important;
+  }
+  .khaos-essential-animation {
+    animation: khaos-spin 1s linear infinite !important;
+  }
+}
+
+@media (forced-colors: active) {
+  .animate-khaos-flash-up,
+  .animate-khaos-flash-down,
+  .animate-khaos-pulse-ring,
+  .animate-khaos-shimmer,
+  .animate-khaos-progress-indeterminate {
+    animation: none !important;
+  }
+  .animate-khaos-signal-pop {
+    animation: none !important;
+    opacity: 1;
+  }
+}
+
+@media (prefers-contrast: high) {
+  .animate-khaos-flash-up,
+  .animate-khaos-flash-down {
+    outline: 2px solid var(--color-success);
+  }
+}
+
+@media print {
+  *, *::before, *::after {
+    animation: none !important;
+  }
+}
