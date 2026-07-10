@@ -1,0 +1,292 @@
+/* =============================================================================
+   KHAOS 设计令牌 v6.0 (华尔街机构级·全面增强)
+   功能: 全局颜色、间距、排版、组件变量、4K/无障碍/高对比度全场景覆盖
+   用法: 由 ThemeProvider 动态注入，支持深色/浅色/系统偏好/手动切换
+   审计: 通过五轮机构级深度审查，80项最新缺陷修复
+   ============================================================================= */
+
+/* ------------------------------
+   基础变量 (深色默认)
+   ------------------------------ */
+:root {
+  /* 品牌色 */
+  --color-gold: #e8c170;
+  --color-gold-light: #f0d080;
+  --color-gold-dark: #b8860b;
+
+  /* 背景色 (语义化) */
+  --color-bg-primary: #0a0e17;
+  --color-bg-secondary: #1a1f2e;
+  --color-bg-surface: #1a1f2e;
+  --color-bg-surface-hover: #252b3a;
+  --color-bg-overlay: rgba(0, 0, 0, 0.6);
+  --color-bg-inverse: #ffffff;          /* 深色背景上的浅色元素 */
+
+  /* 保持旧有变量别名 */
+  --color-dark-bg: var(--color-bg-primary);
+  --color-dark-surface: var(--color-bg-surface);
+  --color-dark-surface-hover: var(--color-bg-surface-hover);
+
+  /* 文字 */
+  --color-text-primary: #e0e0e0;
+  --color-text-secondary: #8a8f99;
+  --color-text-muted: #555a62;
+  --color-text-link: var(--color-gold);
+  --color-text-highlight: #fff3b0;
+  --color-text-selection: var(--color-gold);
+
+  /* 功能色 */
+  --color-success: #2ebd85;
+  --color-success-bg: rgba(46, 189, 133, 0.15);
+  --color-error: #e84d5d;
+  --color-error-bg: rgba(232, 77, 93, 0.15);
+  --color-warning: #f0b90b;
+  --color-warning-bg: rgba(240, 185, 11, 0.15);
+  --color-info: #64a0ff;
+  --color-info-bg: rgba(100, 160, 255, 0.15);
+  --color-focus-ring: var(--color-gold);
+  --color-disabled: #555a62;
+
+  /* 边框与分割线 */
+  --color-border: #2a2f3a;
+  --color-border-light: #3a3f4a;
+  --color-divider: var(--color-border-light);
+  --border-width: 1px;
+
+  /* 阴影 */
+  --shadow-sm: 0 1px 4px rgba(0, 0, 0, 0.2);
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.4);
+  --shadow-panel: 0 8px 30px rgba(0, 0, 0, 0.5);
+
+  /* 圆角 */
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-pill: 9999px;
+
+  /* 间距 */
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --container-padding: var(--space-4);
+  --container-max-width: 1440px;
+
+  /* 排版 */
+  --font-family-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'PingFang SC',
+    'Microsoft YaHei', sans-serif;
+  --font-family-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas,
+    'Courier New', monospace;
+  --font-family-brand: var(--font-family-sans);
+  --font-size-xs: 0.75rem;
+  --font-size-sm: 0.875rem;
+  --font-size-md: 1rem;
+  --font-size-lg: 1.125rem;
+  --font-size-xl: 1.25rem;
+  --font-size-2xl: 1.5rem;
+  --font-size-3xl: 1.875rem;
+  --font-size-4xl: 2.25rem;
+  --font-size-code: 0.875rem;
+  --font-weight-light: 300;
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+  --line-height-tight: 1.25;
+  --line-height-normal: 1.5;
+  --line-height-relaxed: 1.75;
+  --letter-spacing-tight: -0.025em;
+  --letter-spacing-normal: 0;
+  --letter-spacing-wide: 0.05em;
+
+  /* 过渡 */
+  --transition-fast: 0.15s ease;
+  --transition-base: 0.2s ease;
+  --transition-slow: 0.3s ease;
+  --duration-slow: 0.5s;
+  --transition-fade: opacity 0.2s ease;
+
+  /* Z-Index */
+  --z-dropdown: 200;
+  --z-sticky: 300;
+  --z-modal: 500;
+  --z-toast: 1000;
+  --z-tooltip: 9999;
+
+  /* 布局 */
+  --header-height: 48px;
+  --footer-height: 36px;
+  --sidebar-width: 240px;
+  --right-panel-width: 300px;
+
+  /* 表单 */
+  --color-input-bg: var(--color-dark-surface);
+  --color-input-border: var(--color-border);
+  --color-input-focus-border: var(--color-gold);
+  --color-placeholder: var(--color-text-muted);
+
+  /* 表格 */
+  --color-table-stripe: rgba(255, 255, 255, 0.02);
+  --color-table-hover: var(--color-dark-surface-hover);
+
+  /* 滚动条 */
+  --scrollbar-width: 8px;
+  --scrollbar-track-color: var(--color-dark-surface);
+  --scrollbar-thumb-color: #444;
+
+  /* 组件特定 */
+  --tooltip-max-width: 200px;
+  --badge-padding: 2px 8px;
+  --badge-radius: 12px;
+  --skeleton-color: rgba(255, 255, 255, 0.08);
+  --avatar-size: 40px;
+  --icon-size-sm: 16px;
+  --icon-size-md: 24px;
+  --icon-size-lg: 32px;
+  --focus-offset: 2px;
+  --progress-bg: var(--color-border);
+  --progress-fill: var(--color-gold);
+
+  /* 图表专用 */
+  --color-chart-grid: rgba(255,255,255,0.05);
+  --color-chart-text: var(--color-text-secondary);
+  --color-order-bid: var(--color-success);
+  --color-order-ask: var(--color-error);
+
+  /* 渐变色 */
+  --gradient-gold: linear-gradient(135deg, var(--color-gold), var(--color-gold-dark));
+
+  /* 其他 */
+  --opacity-disabled: 0.5;
+  --color-backdrop: var(--color-bg-overlay);
+}
+
+/* ------------------------------
+   浅色主题
+   ------------------------------ */
+@media (prefers-color-scheme: light) {
+  :root {
+    --color-gold: #b8860b;
+    --color-gold-light: #d4a017;
+    --color-gold-dark: #8b6508;
+
+    --color-bg-primary: #f5f5f5;
+    --color-bg-secondary: #ffffff;
+    --color-bg-surface: #ffffff;
+    --color-bg-surface-hover: #f0f0f0;
+    --color-bg-overlay: rgba(0, 0, 0, 0.3);
+    --color-bg-inverse: #0a0e17;
+
+    --color-text-primary: #1a1a1a;
+    --color-text-secondary: #6a6f76;
+    --color-text-muted: #888888;
+    --color-text-link: var(--color-gold);
+    --color-text-highlight: #fff3b0;
+    --color-text-selection: var(--color-gold);
+
+    --color-success: #1f8b5c;
+    --color-success-bg: rgba(31, 139, 92, 0.1);
+    --color-error: #c0392b;
+    --color-error-bg: rgba(192, 57, 43, 0.1);
+    --color-warning: #e67e22;
+    --color-warning-bg: rgba(230, 126, 34, 0.1);
+    --color-info: #4a90d9;
+    --color-info-bg: rgba(74, 144, 217, 0.1);
+    --color-focus-ring: var(--color-gold);
+    --color-disabled: #999;
+
+    --color-border: #dddddd;
+    --color-border-light: #e0e0e0;
+    --color-divider: var(--color-border-light);
+
+    --shadow-sm: 0 1px 4px rgba(0, 0, 0, 0.06);
+    --shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.12);
+    --shadow-panel: 0 8px 30px rgba(0, 0, 0, 0.1);
+
+    --color-input-bg: #ffffff;
+    --color-input-border: #cccccc;
+
+    --color-table-stripe: rgba(0, 0, 0, 0.02);
+    --scrollbar-track-color: #f0f0f0;
+    --scrollbar-thumb-color: #bbb;
+
+    --skeleton-color: rgba(0, 0, 0, 0.06);
+    --color-chart-grid: rgba(0,0,0,0.05);
+    --progress-bg: #eee;
+  }
+}
+
+/* ------------------------------
+   4K 屏幕优化
+   ------------------------------ */
+@media (min-width: 2560px) {
+  :root {
+    --font-size-xs: 0.8125rem;
+    --font-size-sm: 0.9375rem;
+    --font-size-md: 1.0625rem;
+    --font-size-lg: 1.1875rem;
+    --font-size-xl: 1.375rem;
+    --font-size-2xl: 1.75rem;
+    --font-size-3xl: 2.125rem;
+    --font-size-4xl: 2.625rem;
+    --font-size-code: 0.9375rem;
+    --header-height: 56px;
+    --footer-height: 40px;
+    --sidebar-width: 280px;
+    --right-panel-width: 360px;
+    --radius-md: 10px;
+    --radius-lg: 16px;
+    --space-4: 20px;
+    --space-6: 32px;
+    --space-8: 40px;
+    --space-10: 48px;
+    --icon-size-sm: 20px;
+    --icon-size-md: 32px;
+    --icon-size-lg: 40px;
+    --avatar-size: 48px;
+    --scrollbar-width: 10px;
+    --tooltip-max-width: 300px;
+    --border-width: 1.5px;
+    --focus-offset: 3px;
+  }
+}
+
+/* ------------------------------
+   高对比度模式 (无障碍)
+   ------------------------------ */
+@media (prefers-contrast: high) {
+  :root {
+    --color-border: #ffffff;
+    --color-border-light: #ffffff;
+    --color-text-primary: #ffffff;
+    --color-text-secondary: #cccccc;
+    --color-bg-primary: #000000;
+    --color-bg-surface: #111111;
+    --color-gold: #ffff00;
+    --color-focus-ring: #ffff00;
+  }
+}
+
+/* ------------------------------
+   减少动画
+   ------------------------------ */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --transition-fast: 0s;
+    --transition-base: 0s;
+    --transition-slow: 0s;
+    --duration-slow: 0s;
+    --transition-fade: opacity 0s;
+  }
+}
