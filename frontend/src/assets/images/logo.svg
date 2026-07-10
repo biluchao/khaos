@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192">
+  <defs>
+    <!-- 金色金属渐变（盾牌主色） -->
+    <linearGradient id="goldGrad" x1="10%" y1="0%" x2="90%" y2="100%">
+      <stop offset="0%" stop-color="#f7e5b3" />
+      <stop offset="30%" stop-color="#e8c170" />
+      <stop offset="70%" stop-color="#d4a017" />
+      <stop offset="100%" stop-color="#b8860b" />
+    </linearGradient>
+    <!-- 深色背景渐变 -->
+    <radialGradient id="bgGrad" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#1a1f2e" />
+      <stop offset="100%" stop-color="#0a0e17" />
+    </radialGradient>
+    <!-- 盾牌内阴影（凸起效果） -->
+    <linearGradient id="shieldInner" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.15" />
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.3" />
+    </linearGradient>
+    <!-- 外环渐变 -->
+    <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#e8c170" stop-opacity="0.8" />
+      <stop offset="100%" stop-color="#b8860b" stop-opacity="0.3" />
+    </linearGradient>
+  </defs>
+
+  <!-- 1. 背景圆盘（深色渐变） -->
+  <circle cx="96" cy="96" r="92" fill="url(#bgGrad)" />
+  <!-- 外环描边 -->
+  <circle cx="96" cy="96" r="90" fill="none" stroke="url(#ringGrad)" stroke-width="2" />
+
+  <!-- 2. 盾牌主体（金色渐变） -->
+  <path d="
+    M 96 28
+    L 58 54
+    C 52 58 48 64 48 72
+    L 48 104
+    C 48 130 68 158 96 170
+    C 124 158 144 130 144 104
+    L 144 72
+    C 144 64 140 58 134 54
+    Z
+  " fill="url(#goldGrad)" />
+
+  <!-- 盾牌内阴影（增强立体感） -->
+  <path d="
+    M 96 32
+    L 60 56
+    L 54 70
+    L 96 166
+    C 124 154 142 128 142 104
+    L 142 72
+    Z
+  " fill="url(#shieldInner)" />
+
+  <!-- 盾牌高光边缘 -->
+  <path d="
+    M 96 28
+    L 58 54
+    C 52 58 48 64 48 72
+    L 48 104
+    C 48 130 68 158 96 170
+  " fill="none" stroke="#fff" stroke-opacity="0.25" stroke-width="1.5" />
+
+  <!-- 3. 字母 K（深色浮雕效果） -->
+  <g transform="translate(68, 60)">
+    <!-- 垂直线 -->
+    <rect x="0" y="0" width="14" height="64" rx="3" fill="#0a0e17" />
+    <!-- 上斜线 -->
+    <rect x="14" y="2" width="14" height="38" rx="3" transform="rotate(38 14 2)" fill="#0a0e17" />
+    <!-- 下斜线 -->
+    <rect x="14" y="46" width="14" height="38" rx="3" transform="rotate(-38 14 46)" fill="#0a0e17" />
+    <!-- K 字母内高光 -->
+    <rect x="2" y="2" width="10" height="60" rx="2" fill="#1a1f2e" />
+    <rect x="15" y="4" width="10" height="34" rx="2" transform="rotate(38 15 4)" fill="#1a1f2e" />
+    <rect x="15" y="48" width="10" height="34" rx="2" transform="rotate(-38 15 48)" fill="#1a1f2e" />
+  </g>
+
+  <!-- 4. 量化交易折线（盾牌下方装饰） -->
+  <polyline points="68,144 86,130 104,136 122,118 130,124"
+            fill="none" stroke="#e8c170" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+  <!-- 折线末端箭头 -->
+  <polygon points="130,124 124,118 128,128" fill="#e8c170" />
+</svg>
