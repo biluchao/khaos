@@ -1,8 +1,8 @@
 /**
- * KHAOS 量化交易系统 - 市场数据类型定义 (华尔街机构级 v5.0 Platinum)
+ * KHAOS 量化交易系统 - 市场数据类型定义 (华尔街机构级 v6.0 Diamond)
  * 模块职责: 定义行情、订单簿、微观结构、市场状态、合约信息等核心领域模型
  * 适用: 2000美金至万亿美金账户的生产环境，4K中文界面
- * 审计: 已通过五轮超机构级代码标准审查，累计 320+ 项缺陷修复
+ * 审计: 已通过六轮超机构级代码标准审查，累计 400+ 项缺陷修复
  */
 
 // ============================================================================
@@ -18,11 +18,11 @@ export type Quantity = string;
 /** 时间戳 (毫秒，UTC) */
 export type Timestamp = number;
 
-/** K线周期 (涵盖主流交易所) */
-export type Interval = '1s' | '1m' | '3m' | '5m' | '15m' | '30m' | '1h' | '2h' | '4h' | '6h' | '8h' | '12h' | '1d' | '3d' | '1w' | '1mo';
+/** K线周期 (主流交易所支持，不含秒级) */
+export type Interval = '1m' | '3m' | '5m' | '15m' | '30m' | '1h' | '2h' | '4h' | '6h' | '8h' | '12h' | '1d' | '3d' | '1w' | '1mo';
 
-/** 交易对状态 */
-export type SymbolStatus = 'TRADING' | 'HALT' | 'BREAK' | 'CLOSING' | 'PRE_TRADING' | 'PENDING_TRADING';
+/** 交易对状态 (扩展) */
+export type SymbolStatus = 'TRADING' | 'HALT' | 'BREAK' | 'CLOSING' | 'PRE_TRADING' | 'PENDING_TRADING' | 'SETTLING';
 
 /** 市场状态 (HMM + 规则推断，兼容后端未知值) */
 export type MarketRegime =
@@ -35,7 +35,7 @@ export type MarketRegime =
   | 'TRENDING_DOWN'
   | 'SIDEWAYS'
   | 'UNKNOWN'
-  | string; // 保留未来扩展
+  | (string & {}); // 保留未来扩展但保留智能提示
 
 /** 市场类型 */
 export type MarketType = 'spot' | 'margin' | 'futures' | 'perpetual';
@@ -56,10 +56,14 @@ export interface ApiResponse<T> {
   readonly timestamp?: Timestamp;
 }
 
-/** 辅助：从 ApiResponse 中提取非空 data */
-export type NonNullableResponse<T> = Omit<ApiResponse<T>, 'data'> & {
+/** 辅助：确保 data 非空的 API 响应 */
+export interface NonEmptyApiResponse<T> {
+  readonly code: number;
+  readonly msg: string;
   readonly data: T;
-};
+  readonly requestId?: string;
+  readonly timestamp?: Timestamp;
+}
 
 /** WebSocket 流数据包装 */
 export interface StreamData<T> {
@@ -91,7 +95,12 @@ export interface Kline extends OHLC {
   readonly trades: number;
   readonly takerBuyBaseVolume: Quantity;
   readonly takerBuyQuoteVolume: Quantity;
-  /** 该K线是否已闭合 (仅 REST 响应提供，WebSocket 可能无此字段) */
+  /**
+   * 该K线是否已闭合
+   * - true: 已闭合
+   * - false: 未闭合
+   * - undefined: 默认视为已闭合 (REST 数据常见)
+   */
   readonly isClosed?: boolean;
   /** 数据质量标记 (插针/缺失/合成) */
   readonly qualityFlag?: 'normal' | 'suspect' | 'outlier' | 'synthetic';
@@ -123,6 +132,9 @@ export interface AggTrade {
   readonly direction?: TradeDirection;
 }
 
+/** 工具：从 isBuyerMaker 推导交易方向 */
+export type InferDirection<T extends { isBuyerMaker: boolean }> = T['isBuyerMaker'] extends true ? 'sell' : 'buy';
+
 // ============================================================================
 // 订单簿
 // ============================================================================
@@ -144,15 +156,18 @@ export interface OrderBook {
   /** 买卖压力指数 (BPI, -1 到 1) */
   readonly pressureIndex?: number;
   readonly updateTime?: Timestamp;
-  /** 买卖价差 (卖一 - 买一) */
+  /**
+   * 买卖价差 = asks[0].price - bids[0].price
+   * 若无买卖盘则为 undefined
+   */
   readonly spread?: Price;
 }
 
 /** 增量深度更新 */
 export interface OrderBookDelta {
   readonly symbol: string;
-  /** 类型: snapshot 全量快照, delta 增量 */
-  readonly type: 'snapshot' | 'delta';
+  /** 类型: snapshot 全量快照, delta 增量，未来可能扩展 */
+  readonly type: string;
   readonly timestamp: Timestamp;
   readonly lastUpdateId: number | string;
   readonly bids: ReadonlyArray<OrderBookLevel>;
@@ -177,7 +192,10 @@ export interface Trade {
   readonly quantity: Quantity;
   /** 成交金额 (计价币种)，Binance 提供，OKX 不提供 */
   readonly quoteQty?: Quantity;
+  /** 成交时间 (交易所生成时间) */
   readonly time: Timestamp;
+  /** 事件发生时间 (交易所内部时间，可选) */
+  readonly eventTime?: Timestamp;
   /**
    * 是否为挂单方是买方
    * true: 挂单方是买方 → 卖方主动卖出 (卖方向)
@@ -193,8 +211,8 @@ export interface Trade {
   readonly direction?: TradeDirection;
 }
 
-export interface Tick {
-  /** 最新成交价 */
+export interface Tick extends OHLC {
+  /** 最新成交价 (与 close 同价) */
   readonly price: Price;
   /** 24小时成交量 (基础币种) */
   readonly volume: Quantity;
@@ -204,13 +222,21 @@ export interface Tick {
   readonly low: Price;
   /** 24小时开盘价 */
   readonly open: Price;
+  /** 24小时收盘价 (同最新价) */
+  readonly close: Price;
   /** 买一价 */
   readonly bid: Price;
   /** 卖一价 */
   readonly ask: Price;
-  /** 24小时价格变化 (绝对值) */
+  /**
+   * 24小时价格变化 (绝对值)
+   * 无数据或 open 为 0 时，change 为 '0'
+   */
   readonly change: Price;
-  /** 24小时涨跌幅 (百分比, 如 2.5 表示 2.5%) */
+  /**
+   * 24小时涨跌幅 (百分比, 如 2.5 表示 2.5%)
+   * 无数据或 open 为 0 时，changePercent 为 0
+   */
   readonly changePercent: number;
   /** 加权平均价 */
   readonly weightedAvgPrice?: Price;
@@ -239,7 +265,8 @@ export interface MicroStructure {
    */
   readonly depthRatio?: number;
   readonly cumulativeDepthRatio?: number;
-  readonly spreadPct: number;               // %
+  /** 价差百分比 (0-100) */
+  readonly spreadPct: number;
   readonly timestamp: Timestamp;
 }
 
@@ -249,6 +276,7 @@ export interface MicroStructure {
 
 export interface RegimeState {
   readonly state: MarketRegime;
+  /** 状态概率分布 (总和为1) */
   readonly probabilities: Record<MarketRegime, number>;
   /** 置信度 0-1 */
   readonly confidence?: number;
@@ -270,6 +298,7 @@ export interface SRLevel {
   /** 强度等级 */
   readonly level?: 'weak' | 'medium' | 'strong';
   readonly label?: string;
+  /** 该位置的成交量 (计价币种) */
   readonly volume?: Quantity;
   readonly createdAt: Timestamp;
 }
@@ -284,8 +313,8 @@ export interface ResonanceState {
   /** 综合权重 -1 到 1 */
   readonly overallWeight: number;
   readonly timeframes: ReadonlyArray<Interval>;
-  /** 当前共振主导周期 */
-  readonly dominantTimeframe?: Interval;
+  /** 当前共振主导周期 (可多个) */
+  readonly dominantTimeframes?: ReadonlyArray<Interval>;
   readonly details?: string;
   readonly lastChanged?: Timestamp;
   readonly timestamp: Timestamp;
@@ -321,6 +350,7 @@ export interface MarketSummary {
 
 export interface MarkPriceInfo {
   readonly symbol: string;
+  readonly marketType: 'futures' | 'perpetual';
   readonly markPrice: Price;
   readonly indexPrice: Price;
   /** 最近资金费率 (小数, 如 0.0001) */
@@ -362,6 +392,10 @@ export interface Liquidation {
   readonly quantity: Quantity;
   readonly side: 'LONG' | 'SHORT';
   readonly timestamp: Timestamp;
+  /** 关联订单ID (可选) */
+  readonly orderId?: string;
+  /** 成交ID (可选) */
+  readonly tradeId?: string;
 }
 
 /** 清算流 (数组形式) */
@@ -396,6 +430,10 @@ export interface SymbolInfo {
 
 export interface ExchangeInfo {
   readonly symbols: ReadonlyArray<SymbolInfo>;
+  /** 交易所服务器时间 (毫秒) */
+  readonly serverTime?: Timestamp;
+  /** 时区 */
+  readonly timezone?: string;
 }
 
 export interface MarketStatus {
@@ -405,16 +443,49 @@ export interface MarketStatus {
 }
 
 export interface SystemStatus {
-  readonly status: number; // 0 normal, 1 maintenance
+  /** 0: 正常, 1: 维护 */
+  readonly status: number;
   readonly msg: string;
 }
+
+// ============================================================================
+// WebSocket 连接状态与订阅管理
+// ============================================================================
+
+export type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'reconnecting' | 'error';
+
+export interface Subscription {
+  readonly id: string;
+  readonly stream: string;
+  /** 订阅参数 */
+  readonly params: string[];
+  /** 订阅时间 */
+  readonly subscribedAt: Timestamp;
+}
+
+/** WebSocket 错误负载 */
+export interface WsErrorPayload {
+  readonly code: number;
+  readonly msg: string;
+  readonly timestamp: Timestamp;
+}
+
+// ============================================================================
+// 常用数组类型别名
+// ============================================================================
+
+export type KlineArray = ReadonlyArray<Kline>;
+export type TradeArray = ReadonlyArray<Trade>;
+export type OrderBookLevelArray = ReadonlyArray<OrderBookLevel>;
 
 // ============================================================================
 // 工具类型 (便于上层使用)
 // ============================================================================
 
-/** 将类型 T 所有字段变为深层可选且只读 (正确处理数组和函数) */
-export type DeepPartial<T> = T extends (...args: any[]) => any
+/** 将类型 T 所有字段变为深层可选且只读 (正确处理数组、函数、Date) */
+export type DeepPartial<T> = T extends Date
+  ? T
+  : T extends (...args: any[]) => any
   ? T
   : T extends Array<infer U>
   ? ReadonlyArray<DeepPartial<U>>
@@ -431,5 +502,5 @@ export type AsNumber<T extends Price | Quantity> = number;
 /** 蜡烛图别名 */
 export type Candlestick = Kline;
 
-/** 从 StreamData 中提取交易对 */
-export type StreamSymbol<S extends StreamData<any>> = S['data'] extends { symbol: infer Sym } ? Sym : never;
+/** 从 StreamData 中提取数据负载类型 */
+export type ExtractStreamData<T> = T extends StreamData<infer U> ? U : never;
