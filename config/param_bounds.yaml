@@ -1,0 +1,804 @@
+# =============================================================================
+# KHAOS 进化参数边界 v3.0 (华尔街终极安全牢笼)
+# =============================================================================
+config_version: 3.0
+last_audit: 2026-07-11
+auditor: KHAOS Risk Committee
+description: >
+  本文件是进化模块（贝叶斯优化/强化学习/在线调优）的唯一合法参数空间。
+  所有参数调整必须在本边界内。违反约束的修改将被系统自动拒绝并记录审计。
+mapping: 参数路径使用点号连接，对应 config/*.yaml 中的键路径。
+wildcard_support: '使用 * 匹配任意单层键名，仅用于 forbidden_params'
+
+# 支持的约束表达式操作符与函数
+supported_operators: [<, >, <=, >=, ==, !=, sum, abs, min, max]
+on_violation: revert_to_previous   # 违反约束时的默认动作
+
+# -----------------------------------------------------------------------------
+# 策略参数
+# -----------------------------------------------------------------------------
+strategy:
+  trend_prob_filter:
+    prob_threshold:
+      type: float
+      min: 0.55
+      max: 0.85
+      step: 0.01
+      precision: 2
+      default: 0.70
+      group: entry
+      description: "入场概率阈值"
+      description_en: "Entry probability threshold"
+    chaos_half_width:
+      type: float
+      min: 0.3
+      max: 0.8
+      step: 0.05
+      precision: 2
+      default: 0.5
+      group: entry
+      description: "混沌带半宽 (ATR倍数)"
+      description_en: "Chaos half-width in ATR multiples"
+    transition_end:
+      type: float
+      min: 1.0
+      max: 2.0
+      step: 0.05
+      precision: 2
+      default: 1.5
+      group: entry
+      description: "过渡带结束 (ATR倍数)"
+      description_en: "Transition zone end in ATR multiples"
+    consecutive_bars:
+      type: int
+      min: 1
+      max: 5
+      step: 1
+      default: 2
+      group: entry
+      description: "连续向外确认K线数"
+      description_en: "Consecutive outward confirmation bars"
+    gap_penalty_coeff:
+      type: float
+      min: 0.5
+      max: 0.9
+      step: 0.05
+      precision: 2
+      default: 0.7
+      group: entry
+      description: "跳空概率惩罚系数"
+      description_en: "Gap probability penalty coefficient"
+    min_expected_profit_cost_ratio:
+      type: float
+      min: 1.0
+      max: 3.0
+      step: 0.1
+      precision: 1
+      default: 2.0
+      group: entry
+      description: "最小预期利润成本比"
+      description_en: "Minimum expected profit cost ratio"
+
+  escape:
+    thresholds.warn:
+      type: float
+      min: 0.25
+      max: 0.55
+      step: 0.01
+      precision: 2
+      default: 0.40
+      group: exit
+      description: "逃逸警告阈值"
+      description_en: "Escape warning threshold"
+    thresholds.danger:
+      type: float
+      min: 0.45
+      max: 0.80
+      step: 0.01
+      precision: 2
+      default: 0.65
+      group: exit
+      description: "逃逸危险阈值"
+      description_en: "Escape danger threshold"
+    cooldown_bars:
+      type: int
+      min: 5
+      max: 20
+      step: 1
+      default: 10
+      group: exit
+      description: "逃逸后冷却K线数"
+      description_en: "Cooldown bars after escape"
+    weights:
+      momentum:
+        type: float
+        min: 0.1
+        max: 0.5
+        step: 0.05
+        precision: 2
+        default: 0.3
+        group: exit
+        description: "动量衰减权重"
+        description_en: "Momentum decay weight"
+      volatility:
+        type: float
+        min: 0.1
+        max: 0.4
+        step: 0.05
+        precision: 2
+        default: 0.2
+        group: exit
+        description: "波动率反转权重"
+        description_en: "Volatility reversal weight"
+      micro:
+        type: float
+        min: 0.1
+        max: 0.4
+        step: 0.05
+        precision: 2
+        default: 0.2
+        group: exit
+        description: "微观结构权重"
+        description_en: "Microstructure weight"
+      sr:
+        type: float
+        min: 0.05
+        max: 0.3
+        step: 0.05
+        precision: 2
+        default: 0.15
+        group: exit
+        description: "大周期阻力权重"
+        description_en: "Multi-timeframe SR weight"
+      wave:
+        type: float
+        min: 0.05
+        max: 0.3
+        step: 0.05
+        precision: 2
+        default: 0.15
+        group: exit
+        description: "波浪相似度权重"
+        description_en: "Wave similarity weight"
+
+  recapture:
+    prob_threshold:
+      type: float
+      min: 0.55
+      max: 0.80
+      step: 0.01
+      precision: 2
+      default: 0.65
+      group: entry
+      description: "再捕捉概率阈值"
+      description_en: "Recapture probability threshold"
+    recapture_coeff:
+      type: float
+      min: 0.3
+      max: 0.8
+      step: 0.05
+      precision: 2
+      default: 0.6
+      group: entry
+      description: "再捕捉仓位系数"
+      description_en: "Recapture position coefficient"
+    resonance_boost_factor:
+      type: float
+      min: 0.1
+      max: 0.6
+      step: 0.05
+      precision: 2
+      default: 0.3
+      group: entry
+      description: "共振放大系数"
+      description_en: "Resonance boost factor"
+    max_restarts:
+      type: int
+      min: 0
+      max: 5
+      step: 1
+      default: 2
+      group: entry
+      description: "最大重启次数"
+      description_en: "Maximum restart attempts"
+
+  callback_drop:
+    drop_prob_threshold:
+      type: float
+      min: 0.6
+      max: 0.85
+      step: 0.01
+      precision: 2
+      default: 0.7
+      group: entry
+      description: "回落概率阈值"
+      description_en: "Drop probability threshold"
+    position_coeff:
+      type: float
+      min: 0.2
+      max: 0.7
+      step: 0.05
+      precision: 2
+      default: 0.5
+      group: entry
+      description: "回调跌落仓位系数"
+      description_en: "Callback drop position coefficient"
+    stop_tight_atr:
+      type: float
+      min: 0.2
+      max: 0.4
+      step: 0.05
+      precision: 2
+      default: 0.3
+      group: exit
+      description: "紧止损ATR倍数"
+      description_en: "Tight stop ATR multiplier"
+    trail_atr:
+      type: float
+      min: 0.2
+      max: 0.5
+      step: 0.05
+      precision: 2
+      default: 0.35
+      group: exit
+      description: "移动止盈ATR倍数"
+      description_en: "Trailing stop ATR multiplier"
+    prob_weights:
+      price_action:
+        type: float
+        min: 0.1
+        max: 0.5
+        step: 0.05
+        precision: 2
+        default: 0.3
+        group: entry
+        description: "价格行为权重"
+        description_en: "Price action weight"
+      momentum:
+        type: float
+        min: 0.1
+        max: 0.5
+        step: 0.05
+        precision: 2
+        default: 0.3
+        group: entry
+        description: "动量权重"
+        description_en: "Momentum weight"
+      micro:
+        type: float
+        min: 0.1
+        max: 0.4
+        step: 0.05
+        precision: 2
+        default: 0.25
+        group: entry
+        description: "微观结构权重"
+        description_en: "Microstructure weight"
+      timeframe:
+        type: float
+        min: 0.05
+        max: 0.3
+        step: 0.05
+        precision: 2
+        default: 0.15
+        group: entry
+        description: "时间框架权重"
+        description_en: "Timeframe weight"
+
+  pullback_add:
+    prob_threshold:
+      type: float
+      min: 0.6
+      max: 0.85
+      step: 0.01
+      precision: 2
+      default: 0.7
+      group: entry
+      description: "回踩加仓概率阈值"
+      description_en: "Pullback add probability threshold"
+    position_coeff:
+      type: float
+      min: 0.5
+      max: 0.9
+      step: 0.05
+      precision: 2
+      default: 0.8
+      group: entry
+      description: "回踩加仓系数"
+      description_en: "Pullback add position coefficient"
+    consolidation_min_bars:
+      type: int
+      min: 2
+      max: 6
+      step: 1
+      default: 3
+      group: entry
+      description: "最小盘整K线数"
+      description_en: "Minimum consolidation bars"
+    consolidation_max_bars:
+      type: int
+      min: 5
+      max: 15
+      step: 1
+      default: 8
+      group: entry
+      description: "最大盘整K线数"
+      description_en: "Maximum consolidation bars"
+    max_consecutive_adds:
+      type: int
+      min: 1
+      max: 5
+      step: 1
+      default: 3
+      require_approval: true
+      group: entry
+      description: "最大连续加仓次数"
+      description_en: "Max consecutive add position count"
+    volume_filter_threshold:
+      type: float
+      min: 0.4
+      max: 0.9
+      step: 0.05
+      precision: 2
+      default: 0.6
+      group: entry
+      description: "成交量过滤阈值"
+      description_en: "Volume filter threshold"
+    prob_weights:
+      structure:
+        type: float
+        min: 0.1
+        max: 0.5
+        step: 0.05
+        precision: 2
+        default: 0.35
+        group: entry
+        description: "结构权重"
+        description_en: "Structure weight"
+      momentum:
+        type: float
+        min: 0.1
+        max: 0.5
+        step: 0.05
+        precision: 2
+        default: 0.3
+        group: entry
+        description: "动量权重"
+        description_en: "Momentum weight"
+      volume_micro:
+        type: float
+        min: 0.1
+        max: 0.4
+        step: 0.05
+        precision: 2
+        default: 0.25
+        group: entry
+        description: "量能与微观权重"
+        description_en: "Volume & micro weight"
+      timeframe:
+        type: float
+        min: 0.05
+        max: 0.3
+        step: 0.05
+        precision: 2
+        default: 0.1
+        group: entry
+        description: "时间框架权重"
+        description_en: "Timeframe weight"
+
+  resonance:
+    weight:
+      type: float
+      min: 0.2
+      max: 0.8
+      step: 0.05
+      precision: 2
+      default: 0.5
+      group: position
+      description: "共振权重"
+      description_en: "Resonance weight"
+    max_boost:
+      type: float
+      min: 1.1
+      max: 1.8
+      step: 0.05
+      precision: 2
+      default: 1.4
+      require_approval: true
+      group: position
+      description: "最大仓位放大系数"
+      description_en: "Maximum position boost"
+    max_position_change_ratio:
+      type: float
+      min: 0.05
+      max: 0.3
+      step: 0.01
+      precision: 2
+      default: 0.2
+      group: position
+      description: "每K线最大仓位变化比例"
+      description_en: "Max position change per bar"
+    smooth_halflife:
+      type: float
+      min: 2.0
+      max: 10.0
+      step: 0.5
+      precision: 1
+      default: 5.0
+      group: position
+      description: "共振强度平滑半衰期（K线数）"
+      description_en: "Resonance strength smoothing halflife (bars)"
+
+  kalman:
+    q_ratio:
+      type: float
+      min: 0.001
+      max: 0.1
+      log_scale: true
+      log_base: 10
+      precision: 4
+      default: 0.01
+      group: indicator
+      description: "卡尔曼过程噪声比"
+      description_en: "Kalman process noise ratio"
+    q_ratio_jitter:
+      type: float
+      min: 0.001
+      max: 0.05
+      step: 0.001
+      precision: 3
+      default: 0.01
+      group: indicator
+      description: "噪声比微扰"
+      description_en: "Q ratio jitter"
+
+  hmm:
+    n_states:
+      type: int
+      min: 2
+      max: 5
+      step: 1
+      default: 3
+      group: indicator
+      description: "隐状态数量"
+      description_en: "Number of hidden states"
+    retrain_interval:
+      type: int
+      min: 200
+      max: 1000
+      step: 50
+      default: 500
+      group: indicator
+      description: "重训练间隔K线数"
+      description_en: "Retraining interval in bars"
+
+  adaptive_sr:
+    min_sr_distance_atr:
+      type: float
+      min: 0.1
+      max: 0.5
+      step: 0.05
+      precision: 2
+      default: 0.3
+      group: indicator
+      description: "最小有效支撑阻力距离 (ATR)"
+      description_en: "Minimum SR distance in ATR"
+
+  wave_similarity:
+    min_similarity:
+      type: float
+      min: 0.3
+      max: 0.7
+      step: 0.05
+      precision: 2
+      default: 0.5
+      group: indicator
+      description: "波浪相似度最小阈值"
+      description_en: "Minimum wave similarity threshold"
+
+  account_adaptation:
+    reference_balance:
+      type: int
+      min: 1000
+      max: 100000
+      step: 100
+      default: 50000
+      require_approval: true
+      group: risk
+      description: "参考基准资金"
+      description_en: "Reference balance for adaptation"
+
+  range_modules:
+    range_grid:
+      grid_atr_mult:
+        type: float
+        min: 0.3
+        max: 0.8
+        step: 0.05
+        precision: 2
+        default: 0.5
+        require_approval: true
+        group: range
+        description: "网格间距 (ATR倍数)"
+        description_en: "Grid interval in ATR"
+
+# -----------------------------------------------------------------------------
+# 风险参数 (部分需审批)
+# -----------------------------------------------------------------------------
+risk:
+  risk_budget:
+    account_risk_per_trade:
+      type: float
+      min: 0.002
+      max: 0.02
+      step: 0.001
+      precision: 3
+      default: 0.01
+      require_approval: true
+      group: risk
+      description: "单笔风险占净值比例"
+      description_en: "Risk per trade as fraction of equity"
+    min_risk:
+      type: float
+      min: 0.001
+      max: 0.01
+      step: 0.001
+      precision: 3
+      default: 0.002
+      require_approval: true
+      group: risk
+      description: "最小风险比例"
+      description_en: "Minimum risk fraction"
+
+  loss_limits:
+    max_consecutive_losses:
+      type: int
+      min: 3
+      max: 8
+      step: 1
+      default: 5
+      require_approval: true
+      group: risk
+      description: "连续亏损熔断笔数"
+      description_en: "Consecutive losses circuit breaker"
+
+  profit_protection:
+    max_profit_drawdown:
+      type: float
+      min: 0.15
+      max: 0.6
+      step: 0.05
+      precision: 2
+      default: 0.4
+      require_approval: true
+      group: risk
+      description: "最大利润回撤保护"
+      description_en: "Max profit drawdown"
+    hard_profit_drawdown:
+      type: float
+      min: 0.3
+      max: 0.8
+      step: 0.05
+      precision: 2
+      default: 0.6
+      require_approval: true
+      group: risk
+      description: "硬止损利润回撤"
+      description_en: "Hard profit drawdown"
+
+  cost_control:
+    min_risk_reward_ratio:
+      type: float
+      min: 1.0
+      max: 3.0
+      step: 0.1
+      precision: 1
+      default: 1.5
+      require_approval: true
+      group: risk
+      description: "最小净盈亏比"
+      description_en: "Minimum net risk-reward ratio"
+
+# -----------------------------------------------------------------------------
+# 执行参数
+# -----------------------------------------------------------------------------
+execution:
+  slippage:
+    max_slippage_pct:
+      type: float
+      min: 0.01
+      max: 0.12
+      step: 0.01
+      precision: 2
+      default: 0.05
+      require_approval: true
+      group: execution
+      description: "最大允许滑点百分比"
+      description_en: "Max allowed slippage percentage"
+
+  order_lifecycle:
+    timeout_sec:
+      type: int
+      min: 10
+      max: 60
+      step: 5
+      default: 30
+      group: execution
+      description: "限价单超时秒数"
+      description_en: "Limit order timeout seconds"
+    retry_attempts:
+      type: int
+      min: 1
+      max: 4
+      step: 1
+      default: 2
+      group: execution
+      description: "下单失败重试次数"
+      description_en: "Order retry attempts"
+
+  fee_optimizer:
+    max_wait_for_maker_sec:
+      type: int
+      min: 5
+      max: 30
+      step: 5
+      default: 15
+      group: execution
+      description: "最大等待Maker成交秒数"
+      description_en: "Max wait for maker fill seconds"
+    spread_threshold_for_limit:
+      type: float
+      min: 0.02
+      max: 0.10
+      step: 0.01
+      precision: 2
+      default: 0.04
+      group: execution
+      description: "价差阈值（使用限价单）"
+      description_en: "Spread threshold for limit orders"
+
+  execution_risk:
+    market_order_max_slippage_pct:
+      type: float
+      min: 0.2
+      max: 1.0
+      step: 0.05
+      precision: 2
+      default: 0.3
+      require_approval: true
+      group: execution
+      description: "市价单最大滑点百分比"
+      description_en: "Market order max slippage percentage"
+
+  twap:
+    min_order_value_usd:
+      type: int
+      min: 200
+      max: 5000
+      step: 100
+      default: 500
+      group: execution
+      description: "TWAP最小订单金额 (USD)"
+      description_en: "TWAP minimum order value in USD"
+    max_duration_sec:
+      type: int
+      min: 60
+      max: 600
+      step: 30
+      default: 120
+      group: execution
+      description: "TWAP最大执行时间 (秒)"
+      description_en: "TWAP maximum duration in seconds"
+
+# -----------------------------------------------------------------------------
+# 结构化约束 (使用 Python 表达式)
+# -----------------------------------------------------------------------------
+constraints:
+  - rule: "strategy.escape.thresholds.warn < strategy.escape.thresholds.danger"
+    severity: error
+    message: "逃逸警告阈值必须小于危险阈值"
+  - rule: "strategy.escape.thresholds.danger - strategy.escape.thresholds.warn >= 0.10"
+    severity: error
+    message: "逃逸危险与警告阈值之差至少为0.10"
+  - rule: "abs(strategy.escape.weights.momentum + strategy.escape.weights.volatility + strategy.escape.weights.micro + strategy.escape.weights.sr + strategy.escape.weights.wave - 1.0) < 0.02"
+    severity: error
+    message: "逃逸权重之和必须接近1.0"
+  - rule: "strategy.trend_prob_filter.chaos_half_width < strategy.trend_prob_filter.transition_end"
+    severity: error
+    message: "混沌带半宽必须小于过渡带结束点"
+  - rule: "strategy.trend_prob_filter.transition_end - strategy.trend_prob_filter.chaos_half_width >= 0.3"
+    severity: error
+    message: "过渡带宽度至少0.3 ATR"
+  - rule: "strategy.pullback_add.consolidation_min_bars < strategy.pullback_add.consolidation_max_bars"
+    severity: error
+    message: "最小盘整K线数必须小于最大值"
+  - rule: "risk.profit_protection.max_profit_drawdown < risk.profit_protection.hard_profit_drawdown"
+    severity: error
+    message: "最大利润回撤应小于硬止损回撤"
+  - rule: "abs(strategy.callback_drop.prob_weights.price_action + strategy.callback_drop.prob_weights.momentum + strategy.callback_drop.prob_weights.micro + strategy.callback_drop.prob_weights.timeframe - 1.0) < 0.02"
+    severity: error
+    message: "回调跌落权重之和必须接近1.0"
+  - rule: "abs(strategy.pullback_add.prob_weights.structure + strategy.pullback_add.prob_weights.momentum + strategy.pullback_add.prob_weights.volume_micro + strategy.pullback_add.prob_weights.timeframe - 1.0) < 0.02"
+    severity: error
+    message: "回踩加仓权重之和必须接近1.0"
+  - rule: "risk.risk_budget.account_risk_per_trade >= risk.risk_budget.min_risk"
+    severity: error
+    message: "单笔风险必须不小于最小风险"
+  - rule: "strategy.callback_drop.stop_tight_atr < strategy.callback_drop.trail_atr"
+    severity: error
+    message: "紧止损ATR必须小于移动止盈ATR"
+
+# -----------------------------------------------------------------------------
+# 参数耦合组 (同一组内的参数应联合优化)
+# -----------------------------------------------------------------------------
+coupling_groups:
+  - name: chaos_transition
+    params:
+      - strategy.trend_prob_filter.chaos_half_width
+      - strategy.trend_prob_filter.transition_end
+  - name: escape_weights
+    params:
+      - strategy.escape.weights.momentum
+      - strategy.escape.weights.volatility
+      - strategy.escape.weights.micro
+      - strategy.escape.weights.sr
+      - strategy.escape.weights.wave
+  - name: escape_thresholds
+    params:
+      - strategy.escape.thresholds.warn
+      - strategy.escape.thresholds.danger
+  - name: recapture_pair
+    params:
+      - strategy.recapture.prob_threshold
+      - strategy.recapture.recapture_coeff
+  - name: callback_drop_weights
+    params:
+      - strategy.callback_drop.prob_weights.price_action
+      - strategy.callback_drop.prob_weights.momentum
+      - strategy.callback_drop.prob_weights.micro
+      - strategy.callback_drop.prob_weights.timeframe
+  - name: pullback_add_weights
+    params:
+      - strategy.pullback_add.prob_weights.structure
+      - strategy.pullback_add.prob_weights.momentum
+      - strategy.pullback_add.prob_weights.volume_micro
+      - strategy.pullback_add.prob_weights.timeframe
+  - name: profit_protection
+    params:
+      - risk.profit_protection.max_profit_drawdown
+      - risk.profit_protection.hard_profit_drawdown
+
+# -----------------------------------------------------------------------------
+# 禁忌参数 (绝对不允许优化)
+# -----------------------------------------------------------------------------
+forbidden_params:
+  - "*.enabled"                                  # 所有开关型参数
+  - "*.mode"                                     # 系统模式
+  - "risk.leverage.*"                            # 杠杆相关
+  - "risk.loss_limits.max_daily_loss"            # 日亏损熔断
+  - "risk.black_swan.*"                          # 黑天鹅保护
+  - "risk.connection_risk.*"                     # 连接风险
+  - "risk.volatility_guard.*"                    # 波动率保护
+  - "strategy.escape.crisis_weight_override"     # 危机权重覆盖
+  - "strategy.escape.dynamic_thresholds"         # 动态阈值开关
+  - "strategy.trend_prob_filter.adaptive_bands"  # 动态带宽开关
+  - "strategy.trend_prob_filter.volume_confirm"  # 成交量确认开关
+  - "strategy.trend_prob_filter.gap_exemption"   # 跳空豁免开关
+  - "strategy.resonance.skip_ratio_on_gap"       # 跳空仓位跳过
+  - "strategy.hmm.auto_select"                   # HMM自动选择
+  - "strategy.range_modules.*.enabled"           # 所有震荡模块开关
+  - "execution.twap.enabled"                     # TWAP开关
+  - "execution.twap.stop_on_stop_loss"           # TWAP止损开关
+  - "api_keys.*"                                 # API密钥
+  - "system.*"                                   # 系统配置
+
+version_history:
+  - version: 1.0
+    date: 2026-07-01
+    changes: "初始版本"
+  - version: 2.0
+    date: 2026-07-11
+    changes: "深度审计：补全参数、结构化约束、增加耦合组和审批标记"
+  - version: 3.0
+    date: 2026-07-11
+    changes: "终极审计：修正所有精度/步长/审批，补全双语描述，增加多重约束，完善耦合组，细化禁止列表"
