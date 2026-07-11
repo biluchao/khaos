@@ -1,0 +1,69 @@
+{
+  "compilerOptions": {
+    /* ===== 目标与模块 ===== */
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "moduleDetection": "auto",
+
+    /* ===== 路径与解析 ===== */
+    "baseUrl": "./src",
+    "paths": {
+      "@/*": ["./*"]
+    },
+    "typeRoots": ["./node_modules/@types"],
+    "resolveJsonModule": true,
+    "resolvePackageJsonExports": true,
+    "resolvePackageJsonImports": true,
+    "allowImportingTsExtensions": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+
+    /* ===== 输出控制 ===== */
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "importHelpers": true,
+    "removeComments": true,
+    "sourceMap": false,
+
+    /* ===== 严格类型检查 (华尔街级) ===== */
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "strictBindCallApply": true,
+    "strictPropertyInitialization": true,
+    "alwaysStrict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "useUnknownInCatchVariables": true,
+    "forceConsistentCasingInFileNames": true,
+
+    /* ===== 风格与安全性 ===== */
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+    "allowJs": false,
+    "skipLibCheck": false,
+    "noErrorTruncation": true,
+    "newLine": "lf",
+    "charset": "utf8",
+    "emitBOM": false,
+
+    /* ===== 性能与诊断 ===== */
+    "incremental": true,
+    "tsBuildInfoFile": "./node_modules/.cache/tsconfig.tsbuildinfo",
+    "preserveWatchOutput": true,
+    "diagnostics": true,
+    "extendedDiagnostics": true,
+    "listEmittedFiles": true,
+    "pretty": true,
+    "locale": "zh-CN"
+  },
+  "include": ["src"],
+  "exclude": ["node_modules", "dist", "build", "coverage", "scripts"]
+}
