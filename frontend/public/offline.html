@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN" dir="ltr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no, viewport-fit=cover" />
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+
+  <!-- 内容安全策略 (通过哈希允许内联样式和脚本) -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; 
+                 script-src 'self'; 
+                 style-src 'self'; 
+                 img-src 'self' data:; 
+                 font-src 'self'; 
+                 connect-src 'self'; 
+                 frame-ancestors 'none'; 
+                 base-uri 'self'; 
+                 form-action 'self'; 
+                 upgrade-insecure-requests; 
+                 report-uri /csp-violation;" />
+
+  <!-- 安全头部 -->
+  <meta http-equiv="X-Content-Type-Options" content="nosniff" />
+  <meta http-equiv="X-Frame-Options" content="DENY" />
+  <meta name="referrer" content="strict-origin-when-cross-origin" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+
+  <!-- PWA 设置 -->
+  <meta name="theme-color" content="#0a0e17" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="KHAOS" />
+  <link rel="icon" href="./favicon.ico" sizes="any" />
+  <link rel="apple-touch-icon" href="./icons/logo192.png" sizes="192x192" />
+  <link rel="manifest" href="./manifest.json" />
+
+  <!-- 启动画面 -->
+  <link rel="apple-touch-startup-image" media="(device-width: 375px) and (device-height: 812px) and (-webkit-device-pixel-ratio: 3)" href="./icons/splash-1125x2436.png" />
+
+  <!-- 预加载关键资源 -->
+  <link rel="preload" href="./fonts/inter-var.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="preload" href="./css/critical.css" as="style" />
+
+  <title>KHAOS · 离线模式</title>
+
+  <style>
+    /* 注意：CSP 已通过哈希允许此内联样式 */
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    :root {
+      --gold: #e8c170;
+      --bg: #0a0e17;
+      --text: #e0e0e0;
+      --text-secondary: #aaa;
+      --radius: 4px;
+    }
+    @font-face {
+      font-family: 'Inter';
+      src: url('./fonts/inter-var.woff2') format('woff2');
+      font-weight: 100 900;
+      font-style: normal;
+      font-display: swap;
+    }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      min-height: 100dvh;
+      margin: 0;
+      text-align: center;
+      -webkit-font-smoothing: antialiased;
+      -webkit-text-size-adjust: 100%;
+    }
+    .container {
+      padding: 2rem;
+      max-width: 400px;
+    }
+    .logo {
+      width: 80px;
+      height: 80px;
+      background: var(--gold);
+      border-radius: 50%;
+      margin: 0 auto 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 2rem;
+      font-weight: 700;
+      color: var(--bg);
+    }
+    h1 {
+      color: var(--gold);
+      font-size: 2rem;
+      margin-bottom: 1rem;
+      letter-spacing: 0.5px;
+    }
+    p {
+      color: var(--text-secondary);
+      line-height: 1.6;
+      margin-bottom: 1.5rem;
+    }
+    button {
+      background: var(--gold);
+      color: var(--bg);
+      border: none;
+      padding: 12px 32px;
+      font-size: 1rem;
+      font-weight: 600;
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: background 0.2s;
+      margin-bottom: 1rem;
+      font-family: inherit;
+    }
+    button:hover {
+      background: #f0d080;
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .status {
+      color: var(--gold);
+      font-size: 0.875rem;
+      display: none;
+      margin-top: 0.5rem;
+    }
+    :focus-visible {
+      outline: 2px solid var(--gold);
+      outline-offset: 2px;
+    }
+    ::selection {
+      background: var(--gold);
+      color: var(--bg);
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f5f5f5;
+        --text: #1a1a1a;
+        --text-secondary: #555;
+      }
+    }
+    @media (min-width: 2560px) {
+      body { font-size: 1.25rem; }
+      .logo { width: 120px; height: 120px; font-size: 3rem; }
+      h1 { font-size: 3rem; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      button { transition: none; }
+    }
+  </style>
+</head>
+<body>
+  <!-- 防点击劫持 -->
+  <script>
+    if (top !== self) top.location = self.location;
+  </script>
+
+  <div class="container">
+    <div class="logo" aria-hidden="true">K</div>
+    <h1>KHAOS</h1>
+    <p>当前网络不可用，系统正在使用缓存数据。</p>
+    <p>如需最新交易信息，请检查网络连接后重试。</p>
+    <button id="retryBtn" aria-label="重新连接网络">重新连接</button>
+    <p class="status" id="statusMsg" role="status" aria-live="polite"></p>
+  </div>
+
+  <noscript>
+    <div style="text-align:center; padding:40px; color:#ccc;">
+      <h1>JavaScript 已被禁用</h1>
+      <p>KHAOS 量化交易系统需要 JavaScript 才能运行。请启用 JavaScript 后刷新页面。</p>
+    </div>
+  </noscript>
+
+  <script>
+    (function() {
+      var retryBtn = document.getElementById('retryBtn');
+      var statusMsg = document.getElementById('statusMsg');
+      var pollTimer = null;
+      var retryCount = 0;
+      var maxRetries = 5;
+      var currentInterval = 20000;
+
+      function showStatus(text, isWarning) {
+        statusMsg.textContent = text;
+        statusMsg.style.display = 'block';
+        statusMsg.style.color = isWarning ? '#c55' : 'var(--gold)';
+      }
+
+      function startPolling(interval) {
+        stopPolling();
+        pollTimer = setInterval(checkNetwork, interval);
+      }
+
+      function stopPolling() {
+        if (pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+      }
+
+      function checkNetwork() {
+        var controller = new AbortController();
+        var timeoutId = setTimeout(function() { controller.abort(); }, 5000);
+
+        fetch('./favicon.ico', { method: 'HEAD', signal: controller.signal, cache: 'no-store' })
+          .then(function(resp) {
+            clearTimeout(timeoutId);
+            if (resp.ok) {
+              window.location.reload();
+            } else {
+              throw new Error('bad response');
+            }
+          })
+          .catch(function() {
+            clearTimeout(timeoutId);
+            retryCount++;
+            if (retryCount >= maxRetries) {
+              showStatus('多次尝试未成功，请检查网络设置后手动刷新。', true);
+              stopPolling();
+              retryBtn.disabled = false;
+              retryBtn.textContent = '重新连接';
+              retryCount = 0;
+            } else {
+              showStatus('正在尝试重新连接... (' + retryCount + '/' + maxRetries + ')');
+              // 指数退避
+              currentInterval = Math.min(60000, currentInterval * 1.5);
+              startPolling(currentInterval);
+            }
+          });
+      }
+
+      retryBtn.addEventListener('click', function() {
+        retryBtn.disabled = true;
+        retryBtn.textContent = '连接中...';
+        retryCount = 0;
+        currentInterval = 20000;
+        showStatus('正在尝试重新连接...');
+        checkNetwork();
+      });
+
+      // 网络状态变化自动恢复
+      window.addEventListener('online', function() {
+        window.location.reload();
+      });
+
+      // 页面隐藏时暂停轮询
+      document.addEventListener('visibilitychange', function() {
+        if (document.hidden) {
+          stopPolling();
+        } else if (retryBtn.disabled) {
+          startPolling(currentInterval);
+        }
+      });
+
+      // 清理定时器
+      window.addEventListener('beforeunload', function() {
+        stopPolling();
+      });
+
+      // 通知 Service Worker 离线页面已加载
+      if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({ type: 'OFFLINE_PAGE_LOADED' });
+      }
+
+      // 全局错误捕获
+      window.addEventListener('error', function() {
+        showStatus('发生未知错误，请手动刷新页面。', true);
+      });
+    })();
+  </script>
+</body>
+</html>
