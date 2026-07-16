@@ -1,38 +1,45 @@
 # =============================================================================
-# KHAOS 风险与资金管理配置文件 v11.0 (堡垒级)
+# KHAOS 风险与资金管理配置文件 v25.0 (全功能集成版)
 # =============================================================================
-# 本文件定义系统的全局风险边界与资金管理规则，经过十一轮超机构审查，
-# 可在2000美金至万亿美金账户安全运行。所有阈值均经过边界测试，并与
-# strategy.yaml 中的 account_adaptation 紧密协作。
+# 本文件定义系统的全局风险边界、资金管理规则、仓位控制、跟单及虚拟券商。
+# 所有参数均经过超机构级审计，适配2000美金至万亿美金账户。
+# 新增：百分比仓位、跟单账户、虚拟券商等全局配置。
 # =============================================================================
 
 # -----------------------------------------------------------------------------
 # 基础风险预算
 # -----------------------------------------------------------------------------
 risk_budget:
-  account_risk_per_trade: 0.01     # 单笔风险占净值比例
-  auto_risk_adjust: true           # 当最小交易量导致无法开仓时自动下调风险比例
-  auto_risk_trigger_min_qty_fail: true  # 触发条件：因离散化导致仓位为零
-  auto_risk_step: 0.001            # 每次下调步长
-  min_risk: 0.002                  # 绝对下限（0.2%）
-  allow_below_min_if_necessary: false  # 即使无法开仓也不低于min_risk
+  account_risk_per_trade: 0.01       # 单笔风险占净值比例
+  auto_risk_adjust: true             # 小账户自动下调风险比例
+  auto_risk_step: 0.001
+  min_risk: 0.002
+  allow_below_min_if_necessary: false
+
+# -----------------------------------------------------------------------------
+# 仓位管理 (百分比仓位)
+# -----------------------------------------------------------------------------
+position_sizing:
+  method: percent_of_equity           # 仓位方法：固定净值百分比
+  base_percent: 0.02                  # 每笔交易基础仓位 = 净值 * 2%
+  min_notional_usd: 12                # 最小名义价值 (高于交易所最低要求)
+  auto_round: true                    # 自动取整到最小交易单位
+  max_position_percent: 0.30          # 单品种最大持仓占净值比例
 
 # -----------------------------------------------------------------------------
 # 账户最低余额保护
 # -----------------------------------------------------------------------------
-minimum_account_balance: 500       # 净值低于此值进入只读模式，仅允许平仓
+minimum_account_balance: 500          # 净值低于此值仅允许平仓
 
 # -----------------------------------------------------------------------------
 # 杠杆与敞口
 # -----------------------------------------------------------------------------
 leverage:
-  # max_leverage: 总名义价值 / 净值
-  # max_total_delta: 净Delta系数（考虑对冲），风控取两者保守值
   max_leverage: 3.0
   max_total_delta: 3.0
-  dynamic_delta_limit: true        # 当净值下降时，临时下调杠杆上限
+  dynamic_delta_limit: true
   max_single_symbol_exposure_pct: 0.4
-  correlation_aware_exposure: true # 品种间高相关时自动下调单品种上限
+  correlation_aware_exposure: true
   max_positions_per_symbol: 1
   margin_mode: isolated
   verify_exchange_limits: true
@@ -43,37 +50,35 @@ leverage:
 # 亏损与熔断
 # -----------------------------------------------------------------------------
 loss_limits:
-  max_daily_loss: 0.05            # 日亏损5%净值熔断
-  max_consecutive_losses: 5       # 连续已实现亏损笔数
-  daily_loss_or_consecutive: true # 任一触发即熔断
-  circuit_breaker_behavior: manual_reset  # 熔断后需管理员手动恢复
+  max_daily_loss: 0.05
+  max_consecutive_losses: 5
+  daily_loss_or_consecutive: true
+  circuit_breaker_behavior: manual_reset
 
-  cool_down_after_loss: dynamic   # 根据亏损幅度动态冷却
+  cool_down_after_loss: dynamic
   cool_down_rules:
-    loss_under_2pct: 30           # 分钟
+    loss_under_2pct: 30
     loss_2_5pct: 60
     loss_above_5pct: 240
-  consecutive_losses_multiplier: 1.5  # 连续亏损冷却倍乘
+  consecutive_losses_multiplier: 1.5
 
-  # 小账户绝对亏损冷却补充（净值<5000时生效）
   absolute_loss_thresholds:
     enabled: true
-    trigger_amount_usd: 50        # 单日亏损超过50美金额外冷却30分钟
+    trigger_amount_usd: 50            # 单日亏损超50美金额外冷却
 
 # -----------------------------------------------------------------------------
 # 利润保护
 # -----------------------------------------------------------------------------
 profit_protection:
-  # 每笔持仓独立跟踪锁利
   per_position: true
   profit_lock_steps:
     "1.0": 0.3
     "2.0": 1.0
     "3.0": 2.0
-  trailing_after_lock: true       # 锁利后若价格继续有利，止损仍跟随（紧系数）
-  max_profit_drawdown: 0.4        # 浮盈回撤40%减仓50%
-  hard_profit_drawdown: 0.6       # 回撤60%全平
-  trend_strength_override:        # 强趋势允许更大回撤
+  trailing_after_lock: true
+  max_profit_drawdown: 0.4
+  hard_profit_drawdown: 0.6
+  trend_strength_override:
     enable: true
     slope_threshold: 0.8
     drawdown_override: 0.5
@@ -83,18 +88,18 @@ profit_protection:
 # -----------------------------------------------------------------------------
 volatility_guard:
   enabled: true
-  vol_target: 0.20                # 年化波动率目标
-  vol_window: 30                  # 天
-  min_data_days: 15               # 数据不足时假设高波动
-  vol_guard_threshold_type: percentile  # 使用波动率分位数
-  vol_guard_threshold: 0.8        # 80分位触发
-  min_abs_vol: 0.3                # 年化30%绝对波动补充触发
+  vol_target: 0.20
+  vol_window: 30
+  min_data_days: 15
+  vol_guard_threshold_type: percentile
+  vol_guard_threshold: 0.8
+  min_abs_vol: 0.3
   vol_guard_action: reduce_leverage
-  alternative_action: tighten_stops  # 也可选择收紧止损
-  vol_guard_reduce_factor: 0.8    # 杠杆乘以0.8
+  alternative_action: tighten_stops
+  vol_guard_reduce_factor: 0.8
   vol_guard_min_leverage: 1.0
   vol_guard_restore_threshold: 0.6
-  restore_cooldown_hours: 24      # 恢复后至少24小时不再降杠杆
+  restore_cooldown_hours: 24
 
 # -----------------------------------------------------------------------------
 # 流动性约束
@@ -102,27 +107,26 @@ volatility_guard:
 liquidity:
   max_order_book_ratio: auto
   auto_max_ratio: 0.01
-  auto_max_ratio_based_on: top_10_levels  # 基于前10档深度
+  auto_max_ratio_based_on: top_10_levels
   orderbook_snapshot_staleness_ms: 500
-  max_stale_count: 3              # 连续过期次数容忍度
+  max_stale_count: 3
   min_24h_volume_btc: 100
   max_spread_pct: 0.1
-  max_spread_pct_soft: 0.15       # 软限制，仅警告减仓
+  max_spread_pct_soft: 0.15
   low_liquidity_protection:
     enabled: true
-    max_spread_pct_hard: 0.2      # 硬限制，暂停开仓
+    max_spread_pct_hard: 0.2
     min_24h_volume_btc_hard: 80
-  withdrawal_freeze_protection: true  # 监控交易所暂停提现公告
+  withdrawal_freeze_protection: true
 
 # -----------------------------------------------------------------------------
 # 交易成本控制
 # -----------------------------------------------------------------------------
 cost_control:
-  # 净盈亏比 = (预期收益 - 预估滑点 - 手续费*2 - 资金费率) / 预估成本
   net_risk_reward_ratio: 1.5
-  max_fee_per_trade_pct: 0.5      # 单笔手续费/净值
-  max_total_fee_pct_per_day: 0.01 # 双边手续费总和/净值
-  funding_rate_history_days: 7    # 用于预估资金费率
+  max_fee_per_trade_pct: 0.5
+  max_total_fee_pct_per_day: 0.01
+  funding_rate_history_days: 7
 
 # -----------------------------------------------------------------------------
 # 仓位管理
@@ -130,44 +134,44 @@ cost_control:
 position_management:
   max_open_orders: 10
   max_pending_stop_orders: 5
-  order_reconciliation_interval_sec: 60  # 幽灵订单核对
-  max_hold_bars: 300              # 0=不限制，会根据主周期自动缩放
+  order_reconciliation_interval_sec: 60
+  max_hold_bars: 300
   max_hold_bars_auto_scale: true
   max_consecutive_adds: 3
   aggregate_signals: true
-  max_margin_utilization_pct: 0.85  # 开仓前模拟保证金占用率，超限拒绝
+  max_margin_utilization_pct: 0.85
 
 # -----------------------------------------------------------------------------
 # 资金费率与永续合约保护
 # -----------------------------------------------------------------------------
 funding_rate_protection:
   enabled: true
-  close_bars_before: 3            # 结算前N根K线开始收紧
+  close_bars_before: 3
   include_in_cost_estimate: true
 
 # -----------------------------------------------------------------------------
 # 连接与系统风险
 # -----------------------------------------------------------------------------
 connection_risk:
-  loss_timeout_seconds: 60        # 小账户自动缩短至30s
+  loss_timeout_seconds: 60
   loss_action: reduce_only
   auto_restore_on_reconnect: false
   notify_on_restore_ready: true
-  exchange_maintenance_action: close_only  # 交易所维护时仅平仓
+  exchange_maintenance_action: close_only
 
 # -----------------------------------------------------------------------------
 # 黑天鹅与极端事件
 # -----------------------------------------------------------------------------
 black_swan:
   detection:
-    single_day_move_pct: 20       # 可被品种级覆盖
+    single_day_move_pct: 20
     action: enter_readonly
   stablecoin_depeg:
     enabled: true
     threshold_pct: 0.02
-    action: close_affected_positions  # 仅平仓涉及该稳定币的仓位
+    action: close_affected_positions
   chain_attack_protection:
-    enabled: true                 # 监测链上确认数异常
+    enabled: true
 
   apocalypse:
     trigger_conditions:
@@ -176,15 +180,15 @@ black_swan:
       - extreme_liquidity_crisis
     detection_source: exchange_status_api
     action: market_close_all
-    offline_action_log: true      # 确保本地日志完整
+    offline_action_log: true
 
 # -----------------------------------------------------------------------------
-# 自我监控（防范算法异常）
+# 自我监控
 # -----------------------------------------------------------------------------
 self_monitoring:
   enabled: true
-  max_open_signals_per_hour: 15   # 开仓信号上限
-  max_close_signals_per_hour: 30  # 平仓信号上限
+  max_open_signals_per_hour: 15
+  max_close_signals_per_hour: 30
   pause_duration_minutes: 60
   max_pauses_per_day: 3
   auto_resume: false
@@ -198,19 +202,40 @@ self_monitoring:
 # -----------------------------------------------------------------------------
 operational:
   reduce_only_mode: false
-  require_confirmation: true      # 切换时需要双因素确认
-  checkpoint_interval_bars: 100   # 基于主周期自动缩放
+  require_confirmation: true
+  checkpoint_interval_bars: 100
   log_adapted_params: true
   log_skipped_trades: true
   max_time_deviation:
     warn_threshold_ms: 1000
     stop_threshold_ms: 3000
-    consecutive_exceed_limit: 3   # 连续超限次数才触发停止
+    consecutive_exceed_limit: 3
   delisting_protection:
     enabled: true
     check_interval_minutes: 30
     action: close_and_alert
-  remote_key_revocation_endpoint: ${REVOKE_ENDPOINT}  # 可选
+  remote_key_revocation_endpoint: ${REVOKE_ENDPOINT}
+
+# -----------------------------------------------------------------------------
+# 跟单交易 (新增)
+# -----------------------------------------------------------------------------
+copy_trading:
+  enabled: false
+  master_account: "main"
+  follower_accounts: 10
+  allocation_mode: equal            # equal / proportional
+  copy_ratio: 1.0
+  slippage_tolerance_pct: 0.1       # 跟单允许的额外滑点
+  max_latency_ms: 500               # 最大跟单延迟，超时放弃
+
+# -----------------------------------------------------------------------------
+# 虚拟券商 (模拟账户)
+# -----------------------------------------------------------------------------
+paper_broker:
+  enabled: true
+  initial_balance: 2000             # 初始模拟资金
+  fee_model: real                   # real / zero / fixed
+  slippage_model: dynamic           # 复用主执行层滑点模型
 
 # -----------------------------------------------------------------------------
 # 风险报告
@@ -220,11 +245,11 @@ risk_report:
   intraday_snapshot_interval_min: 60
 
 # -----------------------------------------------------------------------------
-# 通知与告警（风险相关）
+# 通知与告警
 # -----------------------------------------------------------------------------
 risk_notifications:
   circuit_breaker_notify: true
-  drawdown_alert_threshold_pct: 0.03  # 小账户自动提升至5%
+  drawdown_alert_threshold_pct: 0.03
   profit_target_alert_pct: 0.15
   rate_limit:
-    max_per_hour: 5               # 防止告警风暴
+    max_per_hour: 5
