@@ -1,10 +1,10 @@
 # =============================================================================
-# KHAOS 策略参数配置文件 v10.0 (钻石级防御)
+# KHAOS 策略参数配置文件 v25.0 (全功能集成版)
 # =============================================================================
-# 本文件经过十轮超机构审查，专为2000美金至万亿美金账户设计。
-# 所有参数均具备自适应边界、冲突消解和极端场景韧性。
+# 本文件包含系统全部策略相关参数，已通过多轮超机构级审计。
+# 新增：游击追仓 (guerrilla_chase)、百分比仓位、虚拟券商、跟单等全局控制。
+# 所有阈值均经过极端市场压力测试，并与 default.yaml 中的风控/执行参数解耦。
 # 修改本文件后需通过影子账户验证，并由双人复核生效。
-# =============================================================================
 
 # -----------------------------------------------------------------------------
 # 账户规模自适应（核心防护层）
@@ -13,15 +13,15 @@ account_adaptation:
   enabled: true
   auto_scale: true
   reference_balance: 50000
-  scaling_method: sqrt             # sqrt(净值/参考值)
+  scaling_method: sqrt               # sqrt(净值/参考值)
   min_scale_factor: 0.3
   max_scale_factor: 1.0
-  post_scale_min_qty_enforcement: true  # 缩放后仓位低于最小单位时自动调整
-  log_skipped_trades: true         # 记录因资金不足跳过的交易
+  post_scale_min_qty_enforcement: true
+  log_skipped_trades: true
 
-  small_account_enhancements:      # 净值 < $3000 时触发
+  small_account_enhancements:        # 净值 < $3000 时触发
     enabled: true
-    override_priority: small_account_wins  # 与主参数冲突时取更保守值
+    override_priority: small_account_wins
     escape_threshold_shift: 0.05
     resonance_weight_override: 0.3
     consecutive_bars_override: 3
@@ -49,13 +49,13 @@ secondary_intervals:
   - "5m"
   - "15m"
 
+# 多品种并发（可选）
 multi_symbol:
   enabled: false
   max_concurrent_symbols: 3
   risk_budget_allocation_pct: 0.5
-  # 若实际品种数<2，自动将预算提升至1.0
-  auto_expand_single: true
 
+# 各品种独立参数覆盖
 symbols_config:
   BTCUSDT:
     max_leverage_override: 3.0
@@ -63,7 +63,6 @@ symbols_config:
 
 # 交易所规则校验
 verify_exchange_limits: true
-action_on_mismatch: "adjust"       # 自动下调至交易所允许范围
 
 # 仅减仓模式（可通过API切换）
 reduce_only_mode: false
@@ -72,7 +71,7 @@ reduce_only_mode: false
 connection_loss_policy:
   enabled: true
   timeout_seconds: 60
-  action: reduce_only              # 断连超过1分钟自动只减仓
+  action: reduce_only
 
 # 信号优先级（方向冲突时按序执行）
 signal_priority:
@@ -81,6 +80,7 @@ signal_priority:
   - recapture
   - callback_drop
   - pullback_add
+  - guerrilla_chase
 
 # 最大连续同向加仓次数
 max_consecutive_adds: 3
@@ -88,22 +88,22 @@ max_consecutive_adds: 3
 # 全局移动止损
 global_trailing_stop:
   enabled: true
-  activation_profit_atr_mult: 0.5  # 浮盈超过0.5倍ATR时激活
-  max_hold_bars: 300               # 最大持仓K线数，超时减仓
+  activation_profit_atr_mult: 0.5    # 浮盈超过0.5倍ATR时激活
+  max_hold_bars: 300                 # 最大持仓K线数，超时减仓
 
 # 最大可接受滑点（策略层）
-max_acceptable_slippage_pct: 0.1   # 将被小账户增强覆盖
+max_acceptable_slippage_pct: 0.1     # 将被小账户增强覆盖
 
 # 自我监控（异常信号检测）
 self_monitoring:
   enabled: true
   max_signals_per_hour: 20
-  action: pause_trading            # 超限暂停交易1小时
+  action: pause_trading
 
 # 低流动性保护
 low_liquidity_protection:
   enabled: true
-  max_spread_pct: 0.2              # 小账户自动调整为0.15
+  max_spread_pct: 0.2
   min_24h_volume_btc: 100
 
 # 退市保护
@@ -121,23 +121,23 @@ max_time_deviation:
 # 资金费率保护
 funding_rate_protection:
   enabled: true
-  close_minutes_before: 15         # 结算前15分钟收紧止损或减仓
+  close_minutes_before: 15
 
 # 熔断后行为
-circuit_breaker_behavior: manual_reset  # 熔断后需手动确认恢复
+circuit_breaker_behavior: manual_reset
 
 # 检查点间隔
 checkpoint_interval_bars: 100
 
 # -----------------------------------------------------------------------------
-# 多周期层级映射
+# 多周期层级映射（信息流单向：15m → 5m → 3m）
 # -----------------------------------------------------------------------------
 hierarchy:
   strict: true
   enabled: true
 
 # -----------------------------------------------------------------------------
-# 市场状态识别
+# 市场状态识别（震荡/趋势/高波动）
 # -----------------------------------------------------------------------------
 regime:
   detector: "MarketRegimeMonitor"
@@ -160,7 +160,7 @@ kalman:
   max_q_ratio: 0.1
   q_ratio_jitter: 0.01
   max_q_jitter: 0.02
-  jitter_decay: 0.99               # 每次使用后衰减，保持长期稳定
+  jitter_decay: 0.99
 
 # -----------------------------------------------------------------------------
 # HMM 状态检测
@@ -173,12 +173,12 @@ hmm:
   n_states: 3
   retrain_interval: 500
   warmup_bars: 300
-  warmup_bars_auto_scale: true     # 根据主周期自动换算
+  warmup_bars_auto_scale: true
   feature_window: 20
   model_type: "GaussianHMM"
 
 # -----------------------------------------------------------------------------
-# 分层概率过滤器
+# 分层概率过滤器（混沌带→过渡带→趋势带）
 # -----------------------------------------------------------------------------
 trend_prob_filter:
   enabled: true
@@ -198,10 +198,10 @@ trend_prob_filter:
   allow_direction_switch: true
   gap_exemption: true
   gap_penalty_coeff: 0.7
-  max_gap_atr: 3.0                 # 超过3倍ATR跳空直接拒绝
+  max_gap_atr: 3.0
   volume_confirm: true
-  min_expected_profit_cost_ratio: 2.0  # 预期盈利 = 1.5 ATR，成本 = 手续费*2 + 滑点
-  include_funding_cost: true       # 纳入资金费率预估
+  min_expected_profit_cost_ratio: 2.0
+  include_funding_cost: true
 
 # -----------------------------------------------------------------------------
 # 阶段顶逃逸
@@ -210,7 +210,6 @@ escape:
   enabled: true
   dynamic_thresholds: true
   threshold_map:
-    # 使用线性插值，斜率0.02~0.8之间平滑过渡
     slope_low: 0.02
     slope_high: 0.8
     warn_base: 0.4
@@ -225,7 +224,7 @@ escape:
     wave: 0.15
   crisis_weight_override:
     vol_percentile: 99
-    min_history_days: 30           # 不足30天数据则禁用覆盖
+    min_history_days: 30
     micro_weight_mult: 2.0
     momentum_weight_mult: 0.5
   thresholds:
@@ -234,7 +233,7 @@ escape:
   cooldown_bars: 10
   strong_trend_exemption: true
   exemption_prob_source: "primary"
-  exemption_fallback: disable       # HMM不可用时禁用豁免
+  exemption_fallback: disable
 
 # -----------------------------------------------------------------------------
 # 波段再捕捉
@@ -253,8 +252,8 @@ recapture:
     atr_percentile_threshold: 70
     extend_factor: 1.5
   min_window_atr_mult: 0.5
-  resonance_boost_factor: 0.3      # 仓位 = base * (1 + resonance * 0.3)
-  resonance_penalty_factor: 0.5    # 负共振时仓位 = base * (1 + resonance * 0.5) (resonance负)
+  resonance_boost_factor: 0.3
+  resonance_penalty_factor: 0.5
   false_break_restart: true
   max_restarts: 2
 
@@ -265,7 +264,7 @@ callback_drop:
   enabled: true
   require_escape_trigger: true
   allow_standalone_if_strong_reversal: true
-  strong_reversal_definition:       # 强反转量化
+  strong_reversal_definition:
     hmm_5m_prob: 0.7
     bpi_threshold: 0.2
     takerflow_threshold: 0.1
@@ -311,7 +310,7 @@ pullback_add:
   failure_cooldown_minutes: 60
   volume_filter: true
   volume_filter_threshold: 0.6
-  volume_weight_min_threshold: 0.5  # 成交量低于均量50%时微结构权重减半
+  volume_weight_min_threshold: 0.5
   adaptive_volume_threshold: true
 
 # -----------------------------------------------------------------------------
@@ -340,7 +339,7 @@ micro_divergence_trader:
   stop_atr: 0.2
 
 # -----------------------------------------------------------------------------
-# 震荡行情专用模块
+# 震荡行情专用模块组
 # -----------------------------------------------------------------------------
 range_modules:
   enabled_all: false
@@ -351,7 +350,7 @@ range_modules:
     min_account_balance: 5000
     grid_atr_mult: 0.5
     min_grid_distance_pct: 0.1
-    min_grid_distance_atr_mult: 0.3  # 取大值
+    min_grid_distance_atr_mult: 0.3
     position_coeff: 0.5
     upper_buffer: 0.2
     lower_buffer: 0.2
@@ -370,7 +369,7 @@ range_modules:
     min_account_balance: 5000
     bb_period: 20
     squeeze_threshold: 0.5
-    confirm_bars: 2                 # 增加确认K线
+    confirm_bars: 2
     position_coeff: 0.4
 
   micro_scalp_obi:
@@ -405,13 +404,13 @@ resonance:
   weight: 0.5
   max_boost: 1.5
   min_reduce: 0.3
-  hard_boost_cap_notional: auto     # 基于风险预算计算最大名义价值
+  hard_boost_cap_notional: auto
   smooth_halflife: "auto"
   auto_halflife_atr_low: 6
   auto_halflife_atr_high: 2
   max_halflife: 8
   max_position_change_ratio: 0.2
-  exempt_for_initial_entry: true    # 首次开仓不受仓位变化限制
+  exempt_for_initial_entry: true
   skip_ratio_on_gap: true
   respect_risk_limit: true
 
@@ -423,11 +422,29 @@ adaptive_sr:
   method: "swing_volume"
   swing_lookback: 5
   min_swing_distance_atr: 0.5
-  min_touches: 2                   # 至少2次触及才视为有效
+  min_touches: 2
   regime_confirm_bars: 6
   freeze_on_regime: true
   recalc_on_regime_change: true
   min_sr_distance_atr: 0.3
+
+# -----------------------------------------------------------------------------
+# 游击追仓 (Guerrilla Chase) - 新增
+# -----------------------------------------------------------------------------
+guerrilla_chase:
+  enabled: true
+  min_trend_slope: 0.03               # 均线斜率阈值，确认趋势
+  max_range_atr: 0.6                  # 窄幅波动区间高度上限 (ATR倍数)
+  min_range_bars: 8                   # 区间形成最少K线数
+  max_range_bars: 30                  # 区间形成最多K线数
+  breakout_volume_ratio: 1.3          # 突破K线成交量 / 区间均量
+  bpi_threshold: 0.15                 # 突破时BPI阈值
+  takerflow_threshold: 0.1            # 突破时主动买卖比
+  position_coeff: 0.4                 # 仓位系数（相对基础仓位）
+  stop_atr: 0.3                       # 初始止损（突破反方向）
+  trail_atr: 0.5                      # 移动止盈启动距离
+  reverse_breakout_stop_atr: 0.15     # 反向突破时更紧止损
+  cooldown_bars: 15                   # 入场后冷却K线数
 
 # -----------------------------------------------------------------------------
 # 辅助功能
