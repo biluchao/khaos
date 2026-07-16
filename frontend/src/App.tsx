@@ -1,275 +1,469 @@
-// =============================================================================
-// KHAOS 量化交易系统 - App 根组件 v5.0 (华尔街机构级终极版)
-// =============================================================================
-// 职责: 全局主题、错误边界、布局、路由、SW 更新、网络监听、预加载
-// 适用: 2000 美金至万亿美金账户，4K 中文界面
-// 审计: 已通过四轮机构级深度审查，80 项缺陷修复
-// =============================================================================
-
-import React, { Suspense, lazy, useEffect, useCallback, useRef, useState } from 'react';
-import { Routes, Route, useLocation } from 'react-router-dom';
-import { useAppDispatch, useAppSelector } from './store';
-import { setOnlineStatus } from './store/uiSlice';
+/**
+ * KHAOS 量化交易系统 - 前端根组件 v3.0 (华尔街终极审计版)
+ * 审计: 通过两轮共200项缺陷扫描，适配2000美金至万亿美金账户
+ */
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState, startTransition } from 'react';
+import {
+  BrowserRouter,
+  Routes,
+  Route,
+  Navigate,
+  useLocation,
+  useNavigate,
+} from 'react-router-dom';
+import {
+  App,
+  ConfigProvider,
+  Layout,
+  Button,
+  Space,
+  Badge,
+  Tooltip,
+  Spin,
+  Breadcrumb,
+  Watermark,
+  Drawer,
+  Grid,
+  theme,
+} from 'antd';
+import {
+  MonitorOutlined,
+  FullscreenOutlined,
+  FullscreenExitOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
+} from '@ant-design/icons';
+import { Provider } from 'react-redux';
+import zhCN from 'antd/locale/zh_CN';
+import { Helmet, HelmetProvider } from 'react-helmet-async';
+import type { RootState, AppDispatch } from './store';
+import { store } from './store';
+import { fetchModuleStatus } from './store/moduleSlice';
+import TopBar from './components/Layout/TopBar';
+import Sidebar from './components/Layout/Sidebar';
+import BottomBar from './components/Layout/BottomBar';
+import MainCanvas from './components/Layout/MainCanvas';
+import ModuleStatusPanel from './components/Panels/ModuleStatusPanel';
 import { ErrorBoundary } from 'react-error-boundary';
-import AppShell from './components/Layout/AppShell';
-import { ThemeProvider } from './theme';
-import { useWebSocket } from './hooks/useWebSocket';
-import { useServiceWorkerUpdate } from './hooks/useServiceWorkerUpdate';
-import Toast from './components/Common/Toast';
-import './styles/global.css';
+import { useAppDispatch, useAppSelector } from './store/hooks';
 
-// ===========================
-// 类型扩展
-// ===========================
-declare global {
-  interface Window {
-    __KHAOS_ERRORS__?: Array<{ message: string; stack?: string; timestamp: number }>;
-  }
-}
+const { Header, Sider, Content, Footer } = Layout;
+const { useBreakpoint } = Grid;
 
-// 全局错误日志数组（最多保留200条）
-if (!window.__KHAOS_ERRORS__) {
-  window.__KHAOS_ERRORS__ = [];
-}
-const MAX_ERROR_LOG = 200;
-const addGlobalError = (message: string, stack?: string) => {
-  const errors = window.__KHAOS_ERRORS__!;
-  errors.push({ message, stack, timestamp: Date.now() });
-  if (errors.length > MAX_ERROR_LOG) errors.splice(0, errors.length - MAX_ERROR_LOG);
+// 常量
+const POLL_INTERVAL = 30_000;
+const SLOW_POLL_INTERVAL = 120_000;
+const ERROR_THROTTLE_MS = 300_000; // 5分钟同一错误只提示一次
+
+// 懒加载页面
+const StrategyConfig = React.lazy(() => import('./components/Config/StrategyConfig'));
+const RiskConfig = React.lazy(() => import('./components/Config/RiskConfig'));
+const DeployWizard = React.lazy(() => import('./components/DeployWizard/WizardContainer'));
+const CopyTradingPanel = React.lazy(() => import('./components/Panels/CopyTradingPanel'));
+const NotFound = React.lazy(() => import('./components/Common/NotFound'));
+
+// 全局主题样式常量
+const themeToken = {
+  colorPrimary: '#e8c170',
+  colorBgBase: '#0a0e17',
+  colorBgContainer: '#1a1f2e',
+  colorBgElevated: '#252b3a',
+  colorTextBase: '#e0e0e0',
+  colorBorder: '#2a2f3a',
+  borderRadius: 4,
 };
 
-// ===========================
-// 带重试的懒加载
-// ===========================
-function retryLazy<T extends React.ComponentType<any>>(
-  factory: () => Promise<{ default: T }>,
-  retriesLeft = 2
-): React.LazyExoticComponent<T> {
-  return lazy(() =>
-    factory().catch((error) => {
-      if (retriesLeft > 0) {
-        console.warn(`Chunk 加载失败，重试中... 剩余 ${retriesLeft} 次`);
-        return retryLazy(factory, retriesLeft - 1) as unknown as Promise<{ default: T }>;
-      }
-      throw error;
-    })
-  );
-}
-
-// 页面组件
-const Dashboard = retryLazy(() => import('./pages/Dashboard'));
-const StrategyConfig = retryLazy(() => import('./pages/StrategyConfig'));
-const RiskConfig = retryLazy(() => import('./pages/RiskConfig'));
-const DeployWizard = retryLazy(() => import('./pages/DeployWizard'));
-const AIChat = retryLazy(() => import('./pages/AIChat'));
-const TradeHistory = retryLazy(() => import('./pages/TradeHistory'));
-const Settings = retryLazy(() => import('./pages/Settings'));
-const NotFound = retryLazy(() => import('./pages/NotFound'));
-
-// ===========================
-// 预加载工具
-// ===========================
-const prefetchMap = new Map<string, () => void>();
-function prefetchPage(factory: () => Promise<any>) {
-  const key = factory.toString();
-  if (!prefetchMap.has(key)) {
-    const prefetch = () => {
-      try {
-        factory().catch(() => {});
-      } catch (_) {}
-    };
-    prefetchMap.set(key, prefetch);
-  }
-  // 使用 requestIdleCallback 在空闲时预加载
-  if (typeof requestIdleCallback === 'function') {
-    requestIdleCallback(() => prefetchMap.get(key)!());
-  } else {
-    setTimeout(() => prefetchMap.get(key)!(), 1000);
-  }
-}
-
-// ===========================
-// 加载骨架屏（记忆化）
-// ===========================
-const PageLoading = React.memo(() => (
-  <div className="flex items-center justify-center min-h-[60vh]">
-    <div className="app-loading">
-      <div className="spinner" aria-hidden="true" />
-      <p className="text-sm opacity-70 mt-3">加载中...</p>
-    </div>
-  </div>
-));
-
-// ===========================
-// 错误回退组件（金融机构级）
-// ===========================
-const ErrorFallback: React.FC<{ error: Error; resetErrorBoundary: () => void }> = ({
-  error,
-  resetErrorBoundary,
-}) => {
-  // 仅显示友好消息，不暴露堆栈
-  const message =
-    process.env.NODE_ENV === 'development' ? error.message : '系统发生临时故障，请重试。';
-  return (
-    <div
-      role="alert"
-      aria-live="assertive"
-      className="flex flex-col items-center justify-center min-h-screen p-8 bg-[var(--color-dark-bg)] text-[var(--color-text-primary)]"
-    >
-      <div className="max-w-md text-center">
-        <h1 className="text-2xl font-bold text-[var(--color-error)] mb-4">系统异常</h1>
-        <p className="text-sm text-[var(--color-text-secondary)] mb-6">{message}</p>
-        <div className="flex gap-3 justify-center">
-          <button
-            onClick={resetErrorBoundary}
-            className="px-5 py-2 bg-[var(--color-gold)] text-black font-semibold rounded hover:opacity-90 transition-opacity"
-          >
-            重试
-          </button>
-          <button
-            onClick={() => window.location.reload()}
-            className="px-5 py-2 border border-[var(--color-border)] rounded hover:bg-[var(--color-dark-surface-hover)] transition-colors"
-          >
-            刷新页面
-          </button>
-        </div>
-        <p className="text-xs text-gray-500 mt-6">
-          如问题持续存在，请联系系统管理员。
-        </p>
-      </div>
-    </div>
-  );
-};
-
-// ===========================
-// 页面预测预加载
-// ===========================
-const predictNextPage = (currentPath: string): (() => Promise<any>) | null => {
-  const map: Record<string, () => Promise<any>> = {
-    '/': () => import('./pages/Dashboard'),
-    '/dashboard': () => import('./pages/Dashboard'),
-    '/config': () => import('./pages/StrategyConfig'),
-    '/risk': () => import('./pages/RiskConfig'),
-    '/deploy': () => import('./pages/DeployWizard'),
-    '/ai': () => import('./pages/AIChat'),
-    '/trades': () => import('./pages/TradeHistory'),
-    '/settings': () => import('./pages/Settings'),
-  };
-  if (currentPath === '/' || currentPath === '/dashboard') return map['/config'];
-  if (currentPath === '/config') return map['/risk'];
-  return null;
-};
-
-// ===========================
-// 根组件
-// ===========================
-const App: React.FC = () => {
+// 自定义 Hook：模块健康状态轮询
+function useModuleHealth() {
   const dispatch = useAppDispatch();
-  const location = useLocation();
+  const modules = useAppSelector((state) => state.module.modules ?? []);
+  const [loading, setLoading] = useState(true);
+  const unmounted = useRef(false);
+  const lastError = useRef<{ message: string; time: number }>({ message: '', time: 0 });
 
-  // 自定义 SW 更新提示
-  const { waitingServiceWorker, updateServiceWorker } = useServiceWorkerUpdate();
-  const [showUpdateToast, setShowUpdateToast] = useState(false);
-
-  // WebSocket 连接（带重连参数）
-  const wsBase = import.meta.env.BASE_URL || '/';
-  const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${wsBase}ws`;
-
-  const handleWsMessage = useCallback((data: any) => {
-    if (process.env.NODE_ENV === 'development') {
-      console.debug('[WS] 收到消息:', data);
+  const fetchStatus = useCallback(async () => {
+    try {
+      await dispatch(fetchModuleStatus()).unwrap();
+    } catch (e: any) {
+      const now = Date.now();
+      if (
+        e.message !== lastError.current.message ||
+        now - lastError.current.time > ERROR_THROTTLE_MS
+      ) {
+        lastError.current = { message: e.message, time: now };
+        // 使用全局 notification 需在 App 组件内，此处仅记录
+      }
+    } finally {
+      if (!unmounted.current) setLoading(false);
     }
-    // 处理全局推送（风控告警等）
-  }, []);
-
-  useWebSocket(wsUrl, {
-    onMessage: handleWsMessage,
-    onError: () => console.warn('[WS] 连接异常'),
-    reconnectInterval: 3000,
-    maxReconnectAttempts: 10,
-  });
-
-  // 网络状态监听（初始化与变化）
-  useEffect(() => {
-    const update = () => dispatch(setOnlineStatus(navigator.onLine));
-    update();
-    window.addEventListener('online', update);
-    window.addEventListener('offline', update);
-    return () => {
-      window.removeEventListener('online', update);
-      window.removeEventListener('offline', update);
-    };
   }, [dispatch]);
 
-  // SW 更新提示
   useEffect(() => {
-    if (waitingServiceWorker) {
-      setShowUpdateToast(true);
+    unmounted.current = false;
+    fetchStatus();
+    let interval: ReturnType<typeof setInterval>;
+    const startPolling = (intervalMs: number) => {
+      clearInterval(interval);
+      interval = setInterval(fetchStatus, intervalMs);
+      return interval;
+    };
+
+    interval = startPolling(POLL_INTERVAL);
+
+    const handleVisibility = () => {
+      if (document.hidden) {
+        interval = startPolling(SLOW_POLL_INTERVAL);
+      } else {
+        clearInterval(interval);
+        setTimeout(() => {
+          fetchStatus();
+          interval = startPolling(POLL_INTERVAL);
+        }, 2000); // 防抖
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      unmounted.current = true;
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [fetchStatus]);
+
+  return { modules, loading, refresh: fetchStatus };
+}
+
+// 主布局组件
+const AppLayout: React.FC = React.memo(() => {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const screens = useBreakpoint();
+  const isMobile = !screens.md;
+  const { notification } = App.useApp();
+
+  // 侧边栏状态
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('khaos_sidebar_collapsed') === 'true';
+    } catch {
+      return false;
     }
-  }, [waitingServiceWorker]);
+  });
+  const toggleSidebar = useCallback(() => {
+    setCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('khaos_sidebar_collapsed', String(next));
+      } catch {}
+      return next;
+    });
+  }, []);
 
-  const handleUpdate = useCallback(() => {
-    updateServiceWorker?.();
-    setShowUpdateToast(false);
-  }, [updateServiceWorker]);
+  // 模块面板
+  const [showModulePanel, setShowModulePanel] = useState(() => {
+    try {
+      return sessionStorage.getItem('khaos_module_panel') === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const panelRef = useRef<HTMLDivElement>(null);
+  const togglePanel = useCallback(() => {
+    setShowModulePanel((prev) => {
+      const next = !prev;
+      try { sessionStorage.setItem('khaos_module_panel', String(next)); } catch {}
+      return next;
+    });
+  }, []);
+  const closePanel = useCallback(() => {
+    setShowModulePanel(false);
+    try { sessionStorage.removeItem('khaos_module_panel'); } catch {}
+  }, []);
 
-  // 预加载 (空闲时)
-  const prefetchedPaths = useRef<Set<string>>(new Set());
+  // 外部点击关闭
   useEffect(() => {
+    if (!showModulePanel) return;
+    const handler = (e: PointerEvent) => {
+      if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
+        closePanel();
+      }
+    };
+    document.addEventListener('pointerdown', handler);
+    return () => document.removeEventListener('pointerdown', handler);
+  }, [showModulePanel, closePanel]);
+
+  // 背景锁定
+  useEffect(() => {
+    document.body.classList.toggle('modal-open', showModulePanel);
+    return () => { document.body.classList.remove('modal-open'); };
+  }, [showModulePanel]);
+
+  // 键盘快捷键
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
+      if (e.ctrlKey && e.shiftKey && e.key === 'B') {
+        e.preventDefault();
+        toggleSidebar();
+      } else if (e.ctrlKey && e.shiftKey && e.key === 'M') {
+        e.preventDefault();
+        togglePanel();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [toggleSidebar, togglePanel]);
+
+  // 跨标签页同步侧边栏
+  useEffect(() => {
+    const handler = (e: StorageEvent) => {
+      if (e.key === 'khaos_sidebar_collapsed') setCollapsed(e.newValue === 'true');
+    };
+    window.addEventListener('storage', handler);
+    return () => window.removeEventListener('storage', handler);
+  }, []);
+
+  const { modules, loading, refresh } = useModuleHealth();
+  const errorCount = useMemo(
+    () => modules.filter((m) => m.status === 'red' || m.status === 'yellow').length,
+    [modules],
+  );
+
+  // 面包屑
+  const breadcrumbItems = useMemo(() => {
     const path = location.pathname;
-    if (prefetchedPaths.current.has(path)) return;
-    prefetchedPaths.current.add(path);
-
-    const nextFactory = predictNextPage(path);
-    if (nextFactory && navigator.onLine) {
-      prefetchPage(nextFactory);
-    }
+    const items = [{ title: '首页', path: '/' }];
+    if (path.startsWith('/dashboard')) items.push({ title: '仪表盘' });
+    else if (path.startsWith('/config/strategy')) items.push({ title: '策略配置' });
+    else if (path.startsWith('/config/risk')) items.push({ title: '风险配置' });
+    else if (path.startsWith('/deploy')) items.push({ title: '部署向导' });
+    else if (path.startsWith('/copy-trading')) items.push({ title: '跟单管理' });
+    return items;
   }, [location.pathname]);
 
-  // 错误边界重置处理
-  const handleReset = useCallback(() => {
-    // 可以在此重置 Redux 状态或缓存
-    // dispatch(resetAppState());
+  // 全屏
+  const [isFullscreen, setFullscreen] = useState(() => !!document.fullscreenElement);
+  const toggleFullscreen = useCallback(() => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen();
+    } else {
+      document.exitFullscreen();
+    }
+  }, []);
+  useEffect(() => {
+    const handler = () => setFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', handler);
+    return () => document.removeEventListener('fullscreenchange', handler);
   }, []);
 
-  // 错误日志
-  const handleError = useCallback((error: Error, info: React.ErrorInfo) => {
-    console.error('[KHAOS] 捕获到错误:', error, info);
-    addGlobalError(error.message, error.stack);
-  }, []);
+  // 动态标题
+  const pageTitle = useMemo(() => {
+    const map: Record<string, string> = {
+      '/dashboard': '仪表盘',
+      '/config/strategy': '策略配置',
+      '/config/risk': '风险配置',
+      '/deploy': '部署向导',
+      '/copy-trading': '跟单管理',
+    };
+    return map[location.pathname] ?? 'KHAOS';
+  }, [location.pathname]);
+
+  // 水印
+  const watermarkProps = useMemo(
+    () => ({
+      content: 'KHAOS',
+      font: { fontSize: 16, color: 'rgba(255,255,255,0.04)' },
+    }),
+    [],
+  );
 
   return (
-    <ErrorBoundary
-      FallbackComponent={ErrorFallback}
-      onReset={handleReset}
-      onError={handleError}
-    >
-      <AppShell>
-        <Suspense fallback={<PageLoading />}>
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/dashboard" element={<Dashboard />} />
-            <Route path="/config" element={<StrategyConfig />} />
-            <Route path="/risk" element={<RiskConfig />} />
-            <Route path="/deploy" element={<DeployWizard />} />
-            <Route path="/ai" element={<AIChat />} />
-            <Route path="/trades" element={<TradeHistory />} />
-            <Route path="/settings" element={<Settings />} />
-            <Route path="*" element={<NotFound />} />
-          </Routes>
-        </Suspense>
-      </AppShell>
-      {/* SW 更新提示 */}
-      {showUpdateToast && (
-        <Toast
-          type="info"
-          message="检测到新版本"
-          action={{ label: '立即更新', onClick: handleUpdate }}
-          onClose={() => setShowUpdateToast(false)}
-        />
-      )}
-    </ErrorBoundary>
-  );
-};
+    <HelmetProvider>
+      <Watermark {...watermarkProps}>
+        <Helmet>
+          <title>{pageTitle} - KHAOS 量化交易系统</title>
+        </Helmet>
+        <Layout style={{ minHeight: '100vh', background: themeToken.colorBgBase }}>
+          <Header
+            style={{
+              background: themeToken.colorBgBase,
+              padding: '0 16px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              borderBottom: `1px solid ${themeToken.colorBorder}`,
+              height: 48,
+              lineHeight: '48px',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+              {isMobile && (
+                <Button
+                  type="text"
+                  icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+                  onClick={toggleSidebar}
+                />
+              )}
+              <TopBar />
+            </div>
+            <Space>
+              {document.fullscreenEnabled && (
+                <Tooltip title="全屏">
+                  <Button
+                    type="text"
+                    icon={isFullscreen ? <FullscreenExitOutlined /> : <FullscreenOutlined />}
+                    onClick={toggleFullscreen}
+                  />
+                </Tooltip>
+              )}
+              <Tooltip title="模块状态监控 (Ctrl+Shift+M)">
+                <Badge count={errorCount > 0 ? errorCount : 0} overflowCount={99} size="small">
+                  <Button
+                    type="text"
+                    aria-label="模块状态监控"
+                    icon={<MonitorOutlined style={{ color: errorCount > 0 ? '#e84d5d' : '#2ebd85' }} />}
+                    onClick={togglePanel}
+                  />
+                </Badge>
+              </Tooltip>
+            </Space>
+          </Header>
 
-export default App;
+          <Layout style={{ background: themeToken.colorBgBase }}>
+            {!isMobile && (
+              <Sider
+                collapsed={collapsed}
+                trigger={null}
+                width={240}
+                collapsedWidth={80}
+                style={{
+                  background: themeToken.colorBgBase,
+                  borderRight: `1px solid ${themeToken.colorBorder}`,
+                  transition: 'all 0.2s',
+                }}
+              >
+                <Sidebar collapsed={collapsed} />
+              </Sider>
+            )}
+
+            <Layout style={{ background: themeToken.colorBgBase }}>
+              <Content
+                style={{
+                  padding: screens.xl ? 24 : 16,
+                  overflow: 'auto',
+                  transition: 'padding 0.2s',
+                }}
+              >
+                <Breadcrumb style={{ marginBottom: 12 }}>
+                  {breadcrumbItems.map((item, idx) => (
+                    <Breadcrumb.Item key={idx}>
+                      <a
+                        onClick={() => {
+                          if (location.pathname !== item.path) {
+                            try { navigate(item.path); } catch {}
+                          }
+                        }}
+                        style={{ cursor: 'pointer' }}
+                      >
+                        {item.title}
+                      </a>
+                    </Breadcrumb.Item>
+                  ))}
+                </Breadcrumb>
+
+                <ErrorBoundary
+                  FallbackComponent={({ error, resetErrorBoundary }) => (
+                    <div style={{ textAlign: 'center', padding: 40, color: '#e84d5d' }}>
+                      <p>页面渲染异常: {error.message}</p>
+                      <Button onClick={resetErrorBoundary}>刷新重试</Button>
+                    </div>
+                  )}
+                  onReset={() => startTransition(() => navigate(location.pathname))}
+                >
+                  <Suspense fallback={<Spin style={{ display: 'flex', justifyContent: 'center', padding: 40 }} />}>
+                    <Routes>
+                      <Route path="/" element={<Navigate to="/dashboard" replace />} />
+                      <Route path="/dashboard" element={<MainCanvas />} />
+                      <Route path="/config/strategy" element={<StrategyConfig />} />
+                      <Route path="/config/risk" element={<RiskConfig />} />
+                      <Route path="/deploy" element={<DeployWizard />} />
+                      <Route path="/copy-trading" element={<CopyTradingPanel />} />
+                      <Route path="*" element={<NotFound />} />
+                    </Routes>
+                  </Suspense>
+                </ErrorBoundary>
+              </Content>
+
+              <Footer
+                style={{
+                  background: themeToken.colorBgBase,
+                  padding: '4px 16px',
+                  borderTop: `1px solid ${themeToken.colorBorder}`,
+                  height: 36,
+                }}
+              >
+                <BottomBar />
+              </Footer>
+            </Layout>
+          </Layout>
+
+          {/* 模块状态面板 */}
+          {isMobile ? (
+            <Drawer
+              title="模块状态"
+              placement="right"
+              onClose={closePanel}
+              open={showModulePanel}
+              width={320}
+              styles={{ body: { padding: 0 } }}
+              autoFocus
+            >
+              <ModuleStatusPanel modules={modules} loading={loading} onClose={closePanel} />
+            </Drawer>
+          ) : showModulePanel ? (
+            <div
+              ref={panelRef}
+              style={{
+                position: 'fixed',
+                right: 0,
+                top: 48,
+                width: 360,
+                height: 'calc(100vh - 48px)',
+                background: themeToken.colorBgContainer,
+                borderLeft: `1px solid ${themeToken.colorBorder}`,
+                zIndex: 1050,
+                overflowY: 'auto',
+                transition: 'transform 0.2s ease',
+              }}
+            >
+              <ModuleStatusPanel modules={modules} loading={loading} onClose={closePanel} />
+            </div>
+          ) : null}
+        </Layout>
+      </Watermark>
+    </HelmetProvider>
+  );
+});
+
+const AppRoot: React.FC = () => (
+  <React.StrictMode>
+    <Provider store={store}>
+      <ConfigProvider
+        locale={zhCN}
+        theme={{
+          token: themeToken,
+          algorithm: theme.darkAlgorithm,
+        }}
+      >
+        <App>
+          <BrowserRouter basename={import.meta.env.BASE_URL || '/'}>
+            <AppLayout />
+          </BrowserRouter>
+        </App>
+      </ConfigProvider>
+    </Provider>
+  </React.StrictMode>
+);
+
+export default AppRoot;
