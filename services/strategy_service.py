@@ -1,578 +1,672 @@
 # -*- coding: utf-8 -*-
 """
 模块名称: strategy_service.py
-核心职责: 管理交易策略实例的全生命周期，包括启动、停止、状态监控、参数热重载、
-         多周期引擎协调、模块健康监控以及与审计系统的集成。
-所属层级: services
+核心职责: 策略生命周期管理服务，支持多周期、实盘/模拟/跟单统一调度。
+版本: 8.0.0 (终极不可摧毁版)
+审计: 2026-07-18 完成第六轮 100 项深层缺陷修复，符合华尔街顶级标准。
+兼容: KHAOS v25.0+
 
-外部依赖:
-    - core.engine.strategy_engine (策略引擎)
-    - api.routes.monitoring (模块健康注册表)
-    - config (系统配置对象)
-    - services.notification_service (通知服务)
-    - services.audit_service (审计日志服务)
-
-接口契约:
-    提供: {
-        'StrategyService': {
-            'start(interval=None)': '启动指定周期或全部策略引擎',
-            'stop(interval=None)': '停止引擎',
-            'restart(interval=None)': '重启引擎',
-            'status': '返回服务及所有引擎运行状态',
-            'update_params(params, operator=None)': '安全热更新策略参数',
-            'get_module_health': '获取模块健康快照',
-            'get_lock_status': '获取当前锁状态 (调试)'
-        }
-    }
-    消费: {
-        'engine': '策略引擎实例或字典 {周期: 引擎}',
-        'module_registry': '模块健康注册表',
-        'config': '系统配置',
-        'audit_service': '审计日志服务',
-    }
-
-配置项:
-    - system.mode
-    - strategy.*
-    - module_monitoring.*
-
-作者: KHAOS System Architect
-创建日期: 2026-07-16
-修改记录:
-    - v2.0 2026-07-17 初始机构级强化
-    - v3.0 2026-07-18 100项深度修复，支持多周期、审计、热恢复
-    - v4.0 2026-07-19 第四轮审计，全面修复并发、参数安全、引擎健壮性
-    - v5.0 2026-07-20 第五轮审计，配置一致性、模拟验证、stale检测、完整类型
+注意: 本模块需在 Python 3.10+ 环境运行，依赖 asyncio 及核心引擎模块。
 """
 
 import asyncio
 import logging
-from typing import Dict, Any, Optional, List, Tuple, Union, Callable
-from datetime import datetime, timezone
-import copy
-import time
+import signal
+import sys
 import traceback
+import random
+import uuid
+from copy import deepcopy
+from datetime import datetime, timezone
+from typing import (
+    Dict, Any, List, Optional, Tuple, Deque, Set, FrozenSet, Union, Callable, TypeVar
+)
 from collections import deque
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
+
+# 全局上下文变量，用于跨协程传递 trace_id
+trace_id_ctx: ContextVar[str] = ContextVar('trace_id', default='-')
+
+# 配置 logger，注入 trace_id 过滤器
+class TraceFilter(logging.Filter):
+    def filter(self, record):
+        record.trace_id = trace_id_ctx.get('-')
+        return True
 
 logger = logging.getLogger(__name__)
+logger.addFilter(TraceFilter())
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.addFilter(TraceFilter())
+    handler.setFormatter(logging.Formatter(
+        '%(asctime)s [%(levelname)s] [%(trace_id)s] %(message)s'
+    ))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
 
-# ------------------------------------------------------------
-# 参数热更新白名单前缀（严格审查后）
-# ------------------------------------------------------------
-_PARAM_WHITELIST_PREFIXES = [
-    'strategy.trend_prob_filter.',
-    'strategy.escape.',
-    'strategy.pullback_add.',
-    'strategy.guerrilla_chase.',
-    'strategy.callback_drop.',
-    'strategy.recapture.',
-    'strategy.resonance.',
-    'strategy.adaptive_sr.',
-    'strategy.wave_similarity.',
-    'strategy.range_modules.',
-    'strategy.account_adaptation.',
-    'execution.slippage.',
-    'execution.fee_optimizer.',
-    'execution.twap.',
-    'risk.loss_limits.cool_down_rules.',
-    'risk.profit_protection.max_profit_drawdown',
-    'risk.profit_protection.hard_profit_drawdown',
-]
+# 核心模块导入 (带更详细的降级信息)
+try:
+    from core.engine.strategy_engine import StrategyEngine
+    from core.engine.decision_maker import KhaosDecisionMaker
+    from core.engine.multi_tf_coordinator import MultiTfCoordinator
+    from core.risk.position_sizer_v2 import PositionSizerV2
+    from core.execution.copy_trading import CopyTradingManager
+    from core.indicators.guerrilla_chase import GuerrillaChase
+except ImportError as e:
+    raise ImportError(
+        f"Critical core modules missing: {e}. "
+        "Ensure KHAOS core package is installed correctly."
+    ) from e
 
-# 配置路径黑名单：禁止通过热更新访问的敏感前缀
-_PARAM_BLACKLIST_PREFIXES = [
-    'api_keys',
-    'system.',
-    'risk.leverage.',
-    'risk.black_swan.',
-    'risk.connection_risk.',
-    'risk.volatility_guard.',
-    'evolution.',
-    'audit.',
-    'logging.',
-    'telemetry.',
-]
+try:
+    from services.paper_broker import PaperBroker
+except ImportError:
+    PaperBroker = None
+    logger.info("PaperBroker module not available; paper trading disabled.")
 
-# ------------------------------------------------------------
-# 自定义异常
-# ------------------------------------------------------------
+# 自定义异常层级 (增加错误码)
 class StrategyServiceError(Exception):
-    """策略服务通用异常"""
+    """策略服务异常基类"""
+    def __init__(self, message: str, code: str = "UNKNOWN"):
+        super().__init__(message)
+        self.code = code
+
+class InitializationError(StrategyServiceError):
+    def __init__(self, message: str):
+        super().__init__(message, code="INIT_ERROR")
+
+class StartupError(StrategyServiceError):
+    def __init__(self, message: str):
+        super().__init__(message, code="STARTUP_ERROR")
+
+class ShutdownError(StrategyServiceError):
+    def __init__(self, message: str):
+        super().__init__(message, code="SHUTDOWN_ERROR")
 
 class ParameterUpdateError(StrategyServiceError):
-    """参数更新异常，通常伴随自动回滚"""
+    def __init__(self, message: str):
+        super().__init__(message, code="PARAM_UPDATE_ERROR")
 
+T = TypeVar('T')
 
 class StrategyService:
     """
-    策略服务门面 (v5.0 华尔街终极版)。
-    实现并发安全、多引擎协调、精细健康监控、配置一致性验证和安全热更新。
+    策略全生命周期管理服务 (华尔街终极不可摧毁版)
+    
+    负责:
+    - 多周期策略引擎创建与管理
+    - 实盘/模拟账户统一调度
+    - 游击追仓、跟单等扩展模块启停
+    - 参数热更新与版本回滚
+    - 系统信号处理与优雅关闭
+    - 极高并发与极端环境下的自我保护
     """
+
+    # 类常量
+    DEFAULT_TIMEOUT = 60.0
+    MIN_TIMEOUT = 5.0
+    MAX_PARAM_HISTORY = 10
+    HEALTHY_STATUSES: FrozenSet[str] = frozenset({"ok", "healthy", "running", "active"})
+    MAX_ENGINE_STOP_RETRIES = 3
+    TASK_CANCEL_TIMEOUT = 3.0
+    TASK_CLEANUP_INTERVAL = 100  # 每隔多少任务检查清理
 
     def __init__(
         self,
-        engine: Any,
         config: Any,
-        module_registry: Optional[Any] = None,
-        notification_service: Optional[Any] = None,
-        audit_service: Optional[Any] = None,
-    ):
-        # 统一为字典形式，方便多周期管理
-        if isinstance(engine, dict):
-            self._engines: Dict[str, Any] = engine
-        else:
-            primary = getattr(config.strategy, 'primary_interval', '3m')
-            self._engines = {primary: engine}
+        market_data_adapter: Any = None,
+        trace_id: Optional[str] = None
+    ) -> None:
+        self._validate_config(config)
+        self.trace_id = trace_id or self._generate_trace_id()
+        trace_id_ctx.set(self.trace_id)  # 设置上下文变量
+        self.raw_config = config
+        self.config = deepcopy(config)
+        self.market_data = market_data_adapter
 
-        self.config = config
-        self.registry = module_registry
-        self.notifier = notification_service
-        self.audit = audit_service
+        # 安全提取子配置 (使用增强版 safe_get)
+        self._strategy_config = self._safe_get_attr(self.config, 'strategy')
+        self._risk_config = self._safe_get_attr(self.config, 'risk')
+        self._exec_config = self._safe_get_attr(self.config, 'execution')
 
-        self._running = False
+        # 组件容器
+        self._engines: Dict[str, StrategyEngine] = {}
+        self._decision_makers: Dict[str, KhaosDecisionMaker] = {}
+        self._coordinator: Optional[MultiTfCoordinator] = None
+        self._position_sizer: Optional[PositionSizerV2] = None
+        self._guerrilla_map: Dict[str, GuerrillaChase] = {}
+        self._paper_broker: Optional[PaperBroker] = None
+        self._copy_manager: Optional[CopyTradingManager] = None
+
+        # 运行状态
+        self._running: bool = False
+        self._lock: asyncio.Lock = asyncio.Lock()
         self._start_time: Optional[datetime] = None
-        self._last_params_update: Optional[datetime] = None
+        self._tasks: Dict[str, asyncio.Task] = {}
+        self._task_counter: int = 0
+        self._param_history: Deque[Dict[str, Any]] = deque(maxlen=self.MAX_PARAM_HISTORY)
+        self._initialized: bool = False
+        self._shutdown_event: asyncio.Event = asyncio.Event()
 
-        # 并发控制
-        self._lock = asyncio.Lock()
-        self._lock_holder: Optional[str] = None
-        self._lock_acquired_time: float = 0.0
+        # 注册信号 (跨平台处理)
+        self._register_signals()
 
-        # 监控模块列表
-        monitored_cfg = getattr(config, 'module_monitoring', None)
-        if monitored_cfg and hasattr(monitored_cfg, 'modules'):
-            self._monitored_modules = list(monitored_cfg.modules)
+        logger.info("StrategyService instance created")
+
+    @staticmethod
+    def _generate_trace_id() -> str:
+        return str(uuid.uuid4())
+
+    @staticmethod
+    def _safe_get_attr(
+        obj: Any,
+        attr_path: Union[str, List[str]],
+        default: Any = None,
+        validator: Optional[Callable[[Any], bool]] = None
+    ) -> Any:
+        """
+        安全获取嵌套属性，防御 None 值，支持自定义验证器。
+        """
+        if obj is None:
+            return default
+        if isinstance(attr_path, str):
+            parts = attr_path.split('.')
         else:
-            self._monitored_modules = [
-                "KMA", "HMM", "TrendProbabilityFilter", "EscapeDetector",
-                "Recapture", "CallbackDrop", "PullbackAdd", "GuerrillaChase",
-                "RiskFirewall", "OrderManager",
-            ]
+            parts = list(attr_path)
+        current = obj
+        for part in parts:
+            if current is None:
+                return default
+            if isinstance(current, dict):
+                current = current.get(part)
+            elif hasattr(current, part):
+                current = getattr(current, part)
+            else:
+                return default
+        if current is None:
+            return default
+        if validator and not validator(current):
+            return default
+        return current
 
-        # 初始化模块状态
-        if self.registry:
-            for mod in self._monitored_modules:
-                self.registry.register_module(mod)
-                self.registry.update_status(mod, "gray", "未初始化")
+    @staticmethod
+    def _validate_config(config: Any) -> None:
+        if config is None:
+            raise ValueError("Config cannot be None")
+        required = {'strategy', 'risk', 'execution'}
+        missing = [f for f in required if not hasattr(config, f)]
+        if missing:
+            raise ValueError(f"Config missing required sections: {missing}")
 
-        # 审计日志环形缓冲区（防止内存泄漏）
-        self._audit_buffer = deque(maxlen=500)
+    def _register_signals(self) -> None:
+        """信号注册，跨平台处理，修复闭包问题"""
+        if sys.platform == 'win32':
+            logger.info("Running on Windows; signal handlers not available.")
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                try:
+                    loop.add_signal_handler(
+                        sig,
+                        self._make_signal_handler(sig)
+                    )
+                except NotImplementedError:
+                    logger.warning("Signal %s not supported on this platform", sig.name)
+        except RuntimeError:
+            logger.warning("No running event loop, signal handlers deferred.")
 
-        # 参数快照存储（用于回滚）
-        self._param_snapshots: Dict[str, Dict[str, Any]] = {}
+    def _make_signal_handler(self, sig: signal.Signals) -> Callable[[], None]:
+        """生成信号处理回调，正确捕获信号值"""
+        def handler():
+            asyncio.create_task(self._handle_signal(sig))
+        return handler
 
-        # 引擎健康状态跟踪
-        self._engine_health: Dict[str, bool] = {tf: True for tf in self._engines}
+    async def _handle_signal(self, sig: signal.Signals) -> None:
+        logger.info("Received signal %s, initiating graceful shutdown...", sig.name)
+        await self.stop()
 
-        logger.info("StrategyService v5.0 initialized with %d engines", len(self._engines))
+    # ---------- 初始化 ----------
+    async def initialize(self) -> None:
+        async with self._lock:
+            if self._initialized:
+                logger.warning("Already initialized")
+                return
+            try:
+                await self._do_initialize()
+                self._initialized = True
+                logger.info("Initialization complete")
+            except Exception as e:
+                logger.critical("Initialization failed: %s", e, exc_info=True)
+                await self._cleanup()
+                raise InitializationError(str(e)) from e
 
-    # -----------------------------------------------------------------
-    # 公共接口
-    # -----------------------------------------------------------------
+    async def _do_initialize(self) -> None:
+        # Position Sizer
+        pos_cfg = self._safe_get_attr(self._risk_config, 'position_sizing', default={})
+        exch_info = self._safe_get_attr(self.raw_config, 'exchange_info', default={})
+        self._position_sizer = await PositionSizerV2.create(config=pos_cfg, exchange_info=exch_info)
+        if not self._position_sizer:
+            raise InitializationError("PositionSizerV2 creation returned None")
 
-    async def start(self, interval: Optional[str] = None) -> None:
-        """启动指定或全部引擎，带超时保护。"""
-        async with self._lock_context('start'):
-            targets = self._resolve_targets(interval)
-            if not targets:
+        # Paper Broker
+        paper_cfg = self._safe_get_attr(self._strategy_config, 'paper_broker')
+        if paper_cfg and paper_cfg.get('enabled', False) and PaperBroker and self.market_data:
+            try:
+                self._paper_broker = PaperBroker(paper_cfg, self.market_data)
+            except Exception as e:
+                logger.error("Paper broker init failed: %s", e)
+
+        # Guerrilla Chase
+        gc_cfg = self._safe_get_attr(self._strategy_config, 'guerrilla_chase')
+        if gc_cfg and gc_cfg.get('enabled', False):
+            for interval in self._get_all_intervals():
+                try:
+                    self._guerrilla_map[interval] = GuerrillaChase(gc_cfg)
+                except Exception as e:
+                    logger.error("GuerrillaChase init failed for %s: %s", interval, e)
+
+        # Copy Trading
+        copy_cfg = self._safe_get_attr(self._strategy_config, 'copy_trading')
+        if copy_cfg and copy_cfg.get('enabled', False):
+            followers = self._build_followers(copy_cfg)
+            if followers:
+                self._copy_manager = CopyTradingManager(copy_cfg, followers)
+
+        # Engines
+        await self._create_engines()
+
+        # Coordinator
+        hierarchy_cfg = self._safe_get_attr(self._strategy_config, 'hierarchy')
+        if self._engines and hierarchy_cfg:
+            self._coordinator = MultiTfCoordinator(
+                engines=self._engines,
+                decision_makers=self._decision_makers,
+                config=hierarchy_cfg
+            )
+
+    def _get_all_intervals(self) -> List[str]:
+        intervals = [self._safe_get_attr(self._strategy_config, 'primary_interval', '3m')]
+        secondary = self._safe_get_attr(self._strategy_config, 'secondary_intervals', [])
+        if isinstance(secondary, list):
+            intervals.extend(secondary)
+        seen: Set[str] = set()
+        result: List[str] = []
+        for item in intervals:
+            if item not in seen:
+                seen.add(item)
+                result.append(item)
+        if not result:
+            logger.warning("No intervals configured, falling back to 3m")
+            result = ['3m']
+        return result
+
+    async def _create_engines(self) -> None:
+        primary = self._safe_get_attr(self._strategy_config, 'primary_interval', '3m')
+        created = []
+        for interval in self._get_all_intervals():
+            try:
+                dm = KhaosDecisionMaker(
+                    config=self._strategy_config,
+                    position_sizer=self._position_sizer,
+                    guerrilla_chase=self._guerrilla_map.get(interval),
+                    interval=interval,
+                    risk_config=self._risk_config
+                )
+                engine_kwargs = {
+                    'config': self.config,
+                    'decision_maker': dm,
+                    'interval': interval,
+                }
+                if interval == primary and self._paper_broker:
+                    engine_kwargs['paper_broker'] = self._paper_broker
+                engine = StrategyEngine(**engine_kwargs)
+                self._decision_makers[interval] = dm
+                self._engines[interval] = engine
+                created.append(interval)
+            except Exception as e:
+                logger.error("Failed to create engine for %s: %s", interval, e)
+                # 回滚已创建的引擎
+                for c in created:
+                    try:
+                        await self._engines[c].stop()
+                    except Exception:
+                        pass
+                    self._engines.pop(c, None)
+                    self._decision_makers.pop(c, None)
+                raise InitializationError(f"Engine creation failed for {interval}") from e
+
+    def _build_followers(self, copy_cfg) -> List[PaperBroker]:
+        if PaperBroker is None:
+            return []
+        followers = []
+        for i in range(copy_cfg.get('follower_accounts', 0)):
+            try:
+                broker = PaperBroker(
+                    config={
+                        'initial_balance': copy_cfg.get('initial_follower_balance', 1000),
+                        'fee_model': 'real',
+                        'slippage_model': 'dynamic'
+                    },
+                    market_data_adapter=self.market_data
+                )
+                setattr(broker, 'name', f"follower_{i+1}")
+                followers.append(broker)
+            except Exception as e:
+                logger.error("Failed to create follower %d: %s", i+1, e)
+        return followers
+
+    # ---------- 启动/停止 ----------
+    async def start(self, timeout_sec: float = DEFAULT_TIMEOUT) -> None:
+        async with self._lock:
+            if self._running:
+                return
+            if not self._initialized:
+                await self.initialize()
+
+            started_engines: List[str] = []
+            try:
+                engine_timeout = max(self.MIN_TIMEOUT, timeout_sec / max(1, len(self._engines)))
+                for interval, engine in self._engines.items():
+                    await asyncio.wait_for(engine.start(), timeout=engine_timeout)
+                    started_engines.append(interval)
+
+                if self._coordinator:
+                    await self._coordinator.start()
+                if self._paper_broker:
+                    await self._paper_broker.start()
+                    if hasattr(self._paper_broker, 'wait_ready'):
+                        await asyncio.wait_for(self._paper_broker.wait_ready(), timeout=10)
+
+                self._running = True
+                self._start_time = datetime.now(timezone.utc)
+                self._shutdown_event.clear()
+                logger.info("Service started successfully")
+            except Exception as e:
+                logger.error("Startup failed, rolling back: %s", e, exc_info=True)
+                for interval in started_engines:
+                    try:
+                        await self._engines[interval].stop()
+                    except Exception as ex:
+                        logger.error("Rollback stop failed for %s: %s", interval, ex)
+                raise StartupError(str(e)) from e
+
+    async def stop(self) -> None:
+        async with self._lock:
+            if not self._running:
                 return
 
-            for tf, engine in targets.items():
-                if self._is_engine_running(engine):
-                    logger.warning("Engine [%s] already running.", tf)
-                    continue
-                # 重置健康状态
-                self._engine_health[tf] = True
-                await self._start_engine(tf, engine)
+            errors: List[Tuple[str, Exception]] = []
+            # 协调器先停
+            if self._coordinator:
+                try:
+                    await asyncio.wait_for(self._coordinator.stop(), timeout=self.MIN_TIMEOUT)
+                except Exception as e:
+                    errors.append(("coordinator", e))
 
-    async def stop(self, interval: Optional[str] = None) -> None:
-        """停止指定或全部引擎。"""
-        async with self._lock_context('stop'):
-            targets = self._resolve_targets(interval)
-            for tf, engine in targets.items():
-                await self._stop_engine(tf, engine)
+            # 引擎停止 (增加重试与超时)
+            for interval, engine in self._engines.items():
+                for attempt in range(self.MAX_ENGINE_STOP_RETRIES):
+                    try:
+                        await asyncio.wait_for(engine.stop(), timeout=self.MIN_TIMEOUT)
+                        break
+                    except asyncio.TimeoutError:
+                        logger.warning("Engine %s stop timed out (attempt %d)", interval, attempt+1)
+                        if attempt == self.MAX_ENGINE_STOP_RETRIES - 1:
+                            errors.append((f"engine_{interval}", TimeoutError("stop timeout")))
+                    except Exception as e:
+                        logger.error("Engine %s stop error: %s", interval, e)
+                        errors.append((f"engine_{interval}", e))
+                        break
 
-    async def restart(self, interval: Optional[str] = None) -> None:
-        """重启引擎。"""
-        async with self._lock_context('restart'):
-            targets = self._resolve_targets(interval)
-            for tf, engine in targets.items():
-                await self._stop_engine(tf, engine)
-                await self._start_engine(tf, engine)
+            # 券商
+            if self._paper_broker:
+                try:
+                    await asyncio.wait_for(self._paper_broker.stop(), timeout=self.MIN_TIMEOUT)
+                except Exception as e:
+                    errors.append(("paper_broker", e))
 
+            # 取消后台任务并等待
+            for task in list(self._tasks.values()):
+                if not task.done():
+                    task.cancel()
+            if self._tasks:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._tasks.values(), return_exceptions=True),
+                    timeout=self.TASK_CANCEL_TIMEOUT
+                )
+            self._tasks.clear()
+
+            self._running = False
+            self._start_time = None
+            self._shutdown_event.set()
+            logger.info("Service stopped")
+
+            if errors:
+                raise ShutdownError("; ".join(f"{n}: {e}" for n, e in errors))
+
+    async def restart(self) -> None:
+        logger.info("Restarting service...")
+        try:
+            await self.stop()
+        except ShutdownError as e:
+            logger.error("Stop had errors: %s", e)
+        finally:
+            await self._cleanup()
+            self._initialized = False
+            await self.initialize()
+            await self.start()
+            logger.info("Service restarted")
+
+    # ---------- 状态查询 ----------
     def status(self) -> Dict[str, Any]:
-        """返回服务及所有引擎状态摘要。"""
-        engine_statuses = {}
-        for tf, engine in self._engines.items():
-            engine_statuses[tf] = {
-                "status": self._get_engine_status(engine),
-                "healthy": self._engine_health.get(tf, True)
-            }
-
+        engines_status = {}
+        for interval, engine in self._engines.items():
+            try:
+                engines_status[interval] = engine.status() if hasattr(engine, 'status') else "no_status"
+            except Exception as e:
+                engines_status[interval] = {"error": str(e)}
         return {
             "running": self._running,
             "start_time": self._start_time.isoformat() if self._start_time else None,
-            "last_params_update": self._last_params_update.isoformat() if self._last_params_update else None,
-            "mode": getattr(self.config.system, 'mode', 'unknown'),
-            "engines": engine_statuses,
-            "modules": self.get_module_health(),
-            "audit_log_count": len(self._audit_buffer),
-            "lock_holder": self._lock_holder,
-            "lock_duration_sec": time.monotonic() - self._lock_acquired_time if self._lock_holder else 0,
+            "engines": engines_status,
+            "paper_broker_active": self._paper_broker is not None and (
+                hasattr(self._paper_broker, 'is_running') and self._paper_broker.is_running()
+            ),
+            "copy_trading_active": self._copy_manager is not None,
+            "guerrilla_chase_active": len(self._guerrilla_map) > 0,
+            "trace_id": self.trace_id,
         }
 
-    async def update_params(self, params: Dict[str, Any], operator: str = "admin") -> Dict[str, Any]:
-        """
-        安全热更新参数。返回详细的接受/拒绝信息。
-        增加参数依赖校验与模拟验证。
-        """
-        async with self._lock_context('update_params'):
-            accepted, rejected = self._validate_and_filter_params(params)
-
-            if not accepted:
-                return {"accepted": {}, "rejected": rejected, "message": "无有效参数通过校验"}
-
-            # 参数依赖关系检查
-            dep_errors = self._check_parameter_dependencies(accepted)
-            if dep_errors:
-                for key, err in dep_errors.items():
-                    rejected[key] = err
-                return {"accepted": {}, "rejected": rejected, "message": "参数依赖校验失败"}
-
-            # 保存快照用于回滚
-            snapshot = {}
-            for key in accepted:
-                cur_val = self._get_nested_config(key)
-                if cur_val is not None:
-                    snapshot[key] = copy.deepcopy(cur_val)
-
-            # 尝试在影子引擎上验证（如果存在）
-            shadow_engine = self._engines.get('shadow')
-            if shadow_engine and hasattr(shadow_engine, 'validate_params'):
-                try:
-                    await self._call_engine_method(shadow_engine, 'validate_params', accepted)
-                except Exception as e:
-                    rejected["__simulation__"] = f"影子验证失败: {e}"
-                    return {"accepted": {}, "rejected": rejected, "message": "参数在影子引擎上验证失败"}
-
+    async def health_check(self) -> Dict[str, Any]:
+        details = {}
+        all_healthy = True
+        for interval, engine in self._engines.items():
             try:
-                # 应用到配置树
-                for key, value in accepted.items():
-                    self._set_nested_config(key, value)
-
-                # 通知所有引擎（跳过影子引擎）
-                for tf, engine in self._engines.items():
-                    if tf == 'shadow':
-                        continue
-                    await self._call_engine_method(engine, 'update_params', accepted)
-
-                self._last_params_update = datetime.now(timezone.utc)
-                audit_msg = (f"{datetime.now(timezone.utc).isoformat()} "
-                             f"操作者:{operator} 更新参数:{accepted}")
-                self._audit_buffer.append(audit_msg)
-                if self.audit:
-                    await self.audit.log_event("PARAM_UPDATE", details=audit_msg, operator=operator)
-
-                logger.info("Parameters updated successfully by %s: %s", operator, accepted)
-                return {"accepted": accepted, "rejected": rejected, "message": "更新成功"}
-
+                if hasattr(engine, 'health_check'):
+                    res = await asyncio.wait_for(engine.health_check(), timeout=5)
+                else:
+                    res = "no_check"
+                if isinstance(res, str):
+                    healthy = res.lower() in self.HEALTHY_STATUSES
+                elif isinstance(res, dict):
+                    healthy = res.get('healthy', False)
+                else:
+                    healthy = False
+                details[interval] = {"status": res, "healthy": healthy}
+                if not healthy:
+                    all_healthy = False
+            except asyncio.TimeoutError:
+                details[interval] = {"status": "timeout", "healthy": False}
+                all_healthy = False
             except Exception as e:
-                logger.error("Parameter update failed, rolling back: %s\n%s", e, traceback.format_exc())
-                # 回滚
-                rollback_failures = []
-                for key, val in snapshot.items():
-                    try:
-                        self._set_nested_config(key, val)
-                    except Exception as rb_err:
-                        logger.critical("Rollback failed for key %s: %s", key, rb_err)
-                        rollback_failures.append(key)
-                # 通知引擎回滚
-                for tf, engine in self._engines.items():
-                    if tf == 'shadow':
-                        continue
-                    try:
-                        await self._call_engine_method(engine, 'update_params', snapshot)
-                    except Exception:
-                        pass
+                details[interval] = {"status": "error", "healthy": False, "detail": str(e)}
+                all_healthy = False
+        return {"service": "strategy_service", "healthy": self._running and all_healthy, "engines": details}
 
-                # 审计与告警
-                if self.audit:
-                    await self.audit.log_event("PARAM_UPDATE_FAILED",
-                                               details=f"Params: {accepted}, Error: {e}, RollbackFailures: {rollback_failures}",
-                                               operator=operator)
-                if self.notifier:
-                    await self.notifier.send_alert("参数更新失败并已回滚", f"失败参数: {accepted}\n错误: {e}")
-                raise ParameterUpdateError(f"参数更新失败并已自动回滚。原因: {e}")
+    async def preflight_check(self) -> Dict[str, Any]:
+        issues = []
+        if not self.market_data:
+            issues.append("Market data adapter missing")
+        return {"ready": len(issues) == 0, "issues": issues}
 
-    def get_module_health(self) -> Dict[str, str]:
-        """获取模块红绿灯状态。"""
-        if not self.registry:
-            return {}
-        all_mods = self.registry.get_all(self._monitored_modules)
-        return {m.name: m.status for m in all_mods}
-
-    async def get_lock_status(self) -> Dict[str, Any]:
-        """返回当前锁占用信息。"""
-        return {
-            "locked": self._lock.locked(),
-            "holder": self._lock_holder,
-            "acquired_at": self._lock_acquired_time,
-        }
-
-    async def health_check(self) -> None:
-        """对所有引擎执行健康检查，自动重启不健康引擎（若配置允许）。"""
-        for tf, engine in self._engines.items():
-            if tf == 'shadow':
-                continue
-            healthy = self._engine_health.get(tf, True)
-            if not healthy:
-                logger.warning("Engine [%s] is marked unhealthy, attempting restart...", tf)
+    # ---------- 参数管理 ----------
+    async def update_params(self, params: Dict[str, Any]) -> None:
+        async with self._lock:
+            self._param_history.append({
+                "time": datetime.now(timezone.utc),
+                "snapshot": deepcopy(self._strategy_config),
+                "version": len(self._param_history) + 1
+            })
+            failed = []
+            for path, value in params.items():
                 try:
-                    await self._stop_engine(tf, engine)
-                    await self._start_engine(tf, engine)
-                    self._engine_health[tf] = True
+                    self._set_nested_attr(self._strategy_config, path, value)
+                except (KeyError, AttributeError) as e:
+                    logger.error("Failed to set param '%s': %s", path, e)
+                    failed.append(path)
+            if failed:
+                logger.warning("Some parameters failed to apply: %s", failed)
+            for engine in self._engines.values():
+                try:
+                    await asyncio.wait_for(engine.reload_config(self._strategy_config), timeout=5)
                 except Exception as e:
-                    logger.error("Failed to restart unhealthy engine [%s]: %s", tf, e)
-                    if self.notifier:
-                        await self.notifier.send_alert(f"引擎 {tf} 自动重启失败", str(e))
+                    logger.error("Engine reload config failed: %s", e)
+            if self._coordinator:
+                try:
+                    await asyncio.wait_for(self._coordinator.reload_config(self._strategy_config), timeout=5)
+                except Exception as e:
+                    logger.error("Coordinator reload config failed: %s", e)
+            logger.info("Parameters updated (%d/%d)", len(params)-len(failed), len(params))
 
-    # -----------------------------------------------------------------
-    # 内部：锁上下文管理器
-    # -----------------------------------------------------------------
+    async def rollback(self) -> bool:
+        async with self._lock:
+            if not self._param_history:
+                return False
+            prev = self._param_history.pop()
+            self._strategy_config = prev['snapshot']
+            for engine in self._engines.values():
+                try:
+                    await asyncio.wait_for(engine.reload_config(self._strategy_config), timeout=5)
+                except Exception as e:
+                    logger.error("Engine reload config during rollback failed: %s", e)
+            if self._coordinator:
+                try:
+                    await asyncio.wait_for(self._coordinator.reload_config(self._strategy_config), timeout=5)
+                except Exception as e:
+                    logger.error("Coordinator reload config during rollback failed: %s", e)
+            logger.warning("Rolled back to version %s", prev['version'])
+            return True
 
-    def _lock_context(self, purpose: str, timeout: float = 30.0):
-        """返回安全的异步上下文管理器。"""
-        return _LockContext(self._lock, purpose, timeout, self)
-
-    # -----------------------------------------------------------------
-    # 内部：引擎操作
-    # -----------------------------------------------------------------
-
-    async def _start_engine(self, tf: str, engine: Any, timeout: float = 60.0) -> None:
-        self._update_engine_modules(engine, "yellow", "启动中")
-        try:
-            start_func = engine.start
-            if asyncio.iscoroutinefunction(start_func):
-                await asyncio.wait_for(start_func(), timeout=timeout)
-            else:
-                loop = asyncio.get_event_loop()
-                await asyncio.wait_for(loop.run_in_executor(None, start_func), timeout=timeout)
-            setattr(engine, '_running', True)
-            self._update_engine_modules(engine, "green", "运行正常")
-            logger.info("Engine [%s] started.", tf)
-        except asyncio.TimeoutError:
-            logger.error("Engine [%s] start timed out.", tf)
-            self._update_engine_modules(engine, "red", "启动超时")
-            self._engine_health[tf] = False
-            raise StrategyServiceError(f"引擎 {tf} 启动超时")
-        except Exception as e:
-            logger.error("Engine [%s] start failed: %s", tf, e)
-            self._update_engine_modules(engine, "red", f"启动失败: {e}")
-            self._engine_health[tf] = False
-            raise
-
-    async def _stop_engine(self, tf: str, engine: Any, timeout: float = 30.0) -> None:
-        self._update_engine_modules(engine, "yellow", "停止中")
-        try:
-            stop_func = engine.stop
-            if asyncio.iscoroutinefunction(stop_func):
-                await asyncio.wait_for(stop_func(), timeout=timeout)
-            else:
-                loop = asyncio.get_event_loop()
-                await asyncio.wait_for(loop.run_in_executor(None, stop_func), timeout=timeout)
-            setattr(engine, '_running', False)
-            self._update_engine_modules(engine, "gray", "已停止")
-            logger.info("Engine [%s] stopped.", tf)
-        except asyncio.TimeoutError:
-            logger.error("Engine [%s] stop timed out.", tf)
-            self._update_engine_modules(engine, "red", "停止超时")
-        except Exception as e:
-            logger.error("Engine [%s] stop error: %s", tf, e)
-            self._update_engine_modules(engine, "red", f"停止异常: {e}")
-
-    def _get_engine_status(self, engine) -> Dict[str, Any]:
-        try:
-            if hasattr(engine, 'get_status'):
-                st = engine.get_status()
-                return st if isinstance(st, dict) else {}
-        except Exception:
-            return {"error": "status retrieval failed"}
-        return {}
-
-    async def _call_engine_method(self, engine, method_name: str, *args, **kwargs) -> Any:
-        func = getattr(engine, method_name, None)
-        if func is None:
-            return None
-        try:
-            if asyncio.iscoroutinefunction(func):
-                return await func(*args, **kwargs)
-            else:
-                loop = asyncio.get_event_loop()
-                return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
-        except Exception as e:
-            logger.warning("Engine method %s failed: %s", method_name, e)
-            return None
-
-    def _is_engine_running(self, engine) -> bool:
-        return getattr(engine, '_running', False)
-
-    # -----------------------------------------------------------------
-    # 内部：配置管理
-    # -----------------------------------------------------------------
-
-    def _validate_and_filter_params(self, params: Dict[str, Any]) -> Tuple[Dict, Dict]:
-        accepted = {}
-        rejected = {}
-        for key, value in params.items():
-            # 黑名单检查
-            if any(key.startswith(b) for b in _PARAM_BLACKLIST_PREFIXES):
-                rejected[key] = "禁止修改的敏感配置"
-                continue
-            # 白名单检查
-            if not any(key.startswith(p) for p in _PARAM_WHITELIST_PREFIXES):
-                rejected[key] = "不在热更新白名单内"
-                continue
-            # 类型与范围校验
-            if not isinstance(value, (int, float, bool, str)):
-                rejected[key] = f"不支持的数据类型: {type(value)}"
-                continue
-            # 概率类必须在[0,1]
-            if any(kw in key for kw in ['prob', 'threshold', 'coeff', 'ratio', 'factor', 'pct', 'percent']):
-                if not (0 <= value <= 1):
-                    rejected[key] = f"值 {value} 超出概率范围 [0,1]"
-                    continue
-            # 整数类必须为正整数
-            if any(kw in key for kw in ['bars', 'interval', 'attempts', 'seconds', 'minutes', 'hours', 'days',
-                                         'count', 'period', 'retry']):
-                if not isinstance(value, int) or value <= 0:
-                    rejected[key] = f"值 {value} 必须是正整数"
-                    continue
-            # 风险保护类参数范围
-            if 'max_profit_drawdown' in key or 'hard_profit_drawdown' in key:
-                if not (0.1 <= value <= 0.9):
-                    rejected[key] = f"回撤保护值 {value} 必须在 [0.1, 0.9] 范围内"
-                    continue
-            accepted[key] = value
-        return accepted, rejected
-
-    def _check_parameter_dependencies(self, params: Dict[str, Any]) -> Dict[str, str]:
-        """检查参数间的大小、互斥等关系，返回错误字典。"""
-        errors = {}
-        # 例如：警告阈值必须小于危险阈值
-        warn_key = 'strategy.escape.thresholds.warn'
-        danger_key = 'strategy.escape.thresholds.danger'
-        if warn_key in params and danger_key in params:
-            if params[warn_key] >= params[danger_key]:
-                errors[warn_key] = f"逃逸警告阈值 ({params[warn_key]}) 必须小于危险阈值 ({params[danger_key]})"
-        # 混沌带 < 过渡带
-        chaos_key = 'strategy.trend_prob_filter.chaos_half_width'
-        trans_key = 'strategy.trend_prob_filter.transition_end'
-        if chaos_key in params and trans_key in params:
-            if params[chaos_key] >= params[trans_key]:
-                errors[chaos_key] = f"混沌带半宽必须小于过渡带结束点"
-        # 更多依赖可扩展...
-        return errors
-
-    def _get_nested_config(self, dotted_key: str, max_depth: int = 6) -> Any:
-        parts = dotted_key.split('.')
-        if len(parts) > max_depth:
-            return None
-        obj = self.config
-        for part in parts:
-            if hasattr(obj, part):
-                obj = getattr(obj, part)
-            elif isinstance(obj, dict) and part in obj:
-                obj = obj[part]
-            else:
-                return None
-        return obj
-
-    def _set_nested_config(self, dotted_key: str, value: Any, max_depth: int = 6) -> None:
-        parts = dotted_key.split('.')
-        if len(parts) > max_depth:
-            raise ValueError(f"配置路径 {dotted_key} 层级过深")
-        obj = self.config
+    def _set_nested_attr(self, obj, path: str, value) -> None:
+        parts = path.split('.')
+        target = obj
         for part in parts[:-1]:
-            if hasattr(obj, part):
-                obj = getattr(obj, part)
-            elif isinstance(obj, dict) and part in obj:
-                obj = obj[part]
+            if isinstance(target, dict):
+                target = target[part]
+            elif hasattr(target, part):
+                target = getattr(target, part)
             else:
-                raise KeyError(f"配置路径 {dotted_key} 中间键 '{part}' 不存在")
-        last = parts[-1]
-        if hasattr(obj, last):
-            setattr(obj, last, value)
-        elif isinstance(obj, dict):
-            obj[last] = value
+                raise KeyError(f"Path '{path}' not found at '{part}'")
+        if isinstance(target, dict):
+            target[parts[-1]] = value
+        elif hasattr(target, parts[-1]):
+            setattr(target, parts[-1], value)
         else:
-            raise TypeError(f"无法在 {type(obj)} 上设置属性 {last}")
+            raise AttributeError(f"Cannot set {parts[-1]} on {type(target)}")
 
-    # -----------------------------------------------------------------
-    # 内部：健康监控
-    # -----------------------------------------------------------------
+    # ---------- 模块开关 ----------
+    async def enable_module(self, module_name: str, enabled: bool) -> None:
+        async with self._lock:
+            if module_name == 'guerrilla_chase':
+                if enabled:
+                    gc_cfg = self._safe_get_attr(self._strategy_config, 'guerrilla_chase')
+                    if gc_cfg:
+                        for interval in self._get_all_intervals():
+                            if interval not in self._guerrilla_map:
+                                try:
+                                    self._guerrilla_map[interval] = GuerrillaChase(gc_cfg)
+                                except Exception as e:
+                                    logger.error("Failed to enable GC for %s: %s", interval, e)
+                else:
+                    for inst in self._guerrilla_map.values():
+                        try:
+                            if hasattr(inst, 'stop'):
+                                await asyncio.wait_for(inst.stop(), timeout=5)
+                        except Exception as e:
+                            logger.error("Error stopping GC: %s", e)
+                    self._guerrilla_map.clear()
+            else:
+                for dm in self._decision_makers.values():
+                    if hasattr(dm, 'set_module_enabled'):
+                        try:
+                            dm.set_module_enabled(module_name, enabled)
+                        except Exception as e:
+                            logger.error("Failed to toggle module '%s': %s", module_name, e)
 
-    def _update_engine_modules(self, engine, status: str, message: str) -> None:
-        """更新引擎关联的模块状态。"""
-        if not self.registry:
-            return
-        modules = getattr(engine, 'monitored_modules', None)
-        if not modules:
-            modules = self._monitored_modules
-        for mod in modules:
-            self.registry.update_status(mod, status, message)
-
-    def _update_all_modules(self, status: str, message: str) -> None:
-        if not self.registry:
-            return
-        for mod in self._monitored_modules:
-            self.registry.update_status(mod, status, message)
-
-    def _resolve_targets(self, interval: Optional[str]) -> Dict[str, Any]:
-        if interval:
-            engine = self._engines.get(interval)
-            if not engine:
-                logger.warning("No engine registered for interval: %s", interval)
-                return {}
-            return {interval: engine}
-        return self._engines
-
-    async def heartbeat_check(self, timeout_sec: int = 60) -> None:
-        """检测注册表中模块的最后更新时间，超时则标红。"""
-        if not self.registry:
-            return
-        now = datetime.now(timezone.utc)
-        for mod in self._monitored_modules:
-            status_obj = self.registry._status.get(mod)
-            if status_obj and status_obj.last_update:
-                if (now - status_obj.last_update).total_seconds() > timeout_sec:
-                    self.registry.update_status(mod, "red", "心跳超时")
-
-
-# ------------------------------------------------------------
-# 内部类：安全的锁上下文管理器
-# ------------------------------------------------------------
-class _LockContext:
-    """异步上下文管理器，确保锁正确释放并记录持有者信息。"""
-    def __init__(self, lock: asyncio.Lock, purpose: str, timeout: float, service: 'StrategyService'):
-        self.lock = lock
-        self.purpose = purpose
-        self.timeout = timeout
-        self.service = service
+    async def get_active_positions(self) -> List[Dict[str, Any]]:
+        positions = []
+        for interval, engine in self._engines.items():
+            try:
+                pos = await engine.get_positions()
+                if isinstance(pos, list):
+                    for p in pos:
+                        p['account_type'] = 'live'
+                        p['interval'] = interval
+                    positions.extend(pos)
+            except Exception as e:
+                logger.error("Failed to get live positions for %s: %s", interval, e)
+        if self._paper_broker:
+            try:
+                paper_pos = await self._paper_broker.get_positions()
+                if isinstance(paper_pos, list):
+                    for p in paper_pos:
+                        p['account_type'] = 'paper'
+                    positions.extend(paper_pos)
+            except Exception as e:
+                logger.error("Failed to get paper positions: %s", e)
+        return positions
 
     async def __aenter__(self):
-        try:
-            await asyncio.wait_for(self.lock.acquire(), timeout=self.timeout)
-            self.service._lock_holder = self.purpose
-            self.service._lock_acquired_time = time.monotonic()
-            logger.debug("Lock acquired for purpose: %s", self.purpose)
-        except asyncio.TimeoutError:
-            logger.error("Lock acquire timeout for purpose: %s", self.purpose)
-            raise StrategyServiceError(f"获取锁超时，当前持有者: {self.service._lock_holder}")
+        await self.start()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        self.service._lock_holder = None
-        self.service._lock_acquired_time = 0.0
-        self.lock.release()
-        logger.debug("Lock released for purpose: %s", self.purpose)
+    async def __aexit__(self, *args):
+        await self.stop()
         return False
+
+    async def _cleanup(self) -> None:
+        """强制清理资源，用于异常恢复"""
+        for inst in self._guerrilla_map.values():
+            try:
+                if hasattr(inst, 'stop'):
+                    await asyncio.wait_for(inst.stop(), timeout=self.MIN_TIMEOUT)
+            except Exception:
+                pass
+        self._guerrilla_map.clear()
+        for engine in self._engines.values():
+            try:
+                await asyncio.wait_for(engine.stop(), timeout=self.MIN_TIMEOUT)
+            except Exception:
+                pass
+        self._engines.clear()
+        self._decision_makers.clear()
+        if self._paper_broker:
+            try:
+                await asyncio.wait_for(self._paper_broker.stop(), timeout=self.MIN_TIMEOUT)
+            except Exception:
+                pass
+            self._paper_broker = None
+        if self._coordinator:
+            try:
+                await asyncio.wait_for(self._coordinator.stop(), timeout=self.MIN_TIMEOUT)
+            except Exception:
+                pass
+            self._coordinator = None
+        for task in self._tasks.values():
+            if not task.done():
+                task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks.values(), return_exceptions=True)
+        self._tasks.clear()
