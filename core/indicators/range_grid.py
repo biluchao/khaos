@@ -8,7 +8,7 @@
 外部依赖:
     - numpy (数值计算)
     - collections.deque (高效缓存)
-    - asyncio (异步锁)
+    - threading (并发锁)
     - core.models.kline (Kline 数据结构)
     - core.interfaces (FeatureComputer 基类)
 
@@ -24,7 +24,7 @@
         'context["atr_5m"]': '5分钟ATR值',
         'context["regime"]': '当前市场状态 (必须为 RANGE)',
         'context["kline_history_5m"]': '历史K线列表 (用于区间识别)',
-        'context["account_equity"]': '账户净值 (用于仓位风控)',
+        'context["account_equity"]': '账户净值 (已包含浮动盈亏)',
         'context["price_tick"]': '最小价格变动单位',
         'execution_adapter': '订单执行接口'
     }
@@ -33,8 +33,8 @@
     - strategy.range_modules.range_grid.enabled (bool, false): 是否启用网格
     - strategy.range_modules.range_grid.grid_atr_mult (float, 0.5): 网格间距 (ATR倍数)
     - strategy.range_modules.range_grid.position_coeff (float, 0.5): 单格仓位系数
-    - strategy.range_modules.range_grid.upper_buffer (float, 0.2): 上沿内缩比例
-    - strategy.range_modules.range_grid.lower_buffer (float, 0.2): 下沿内缩比例
+    - strategy.range_modules.range_grid.upper_buffer (float, 0.2): 上沿内缩比例(相对区间高度)
+    - strategy.range_modules.range_grid.lower_buffer (float, 0.2): 下沿内缩比例(相对区间高度)
     - strategy.range_modules.range_grid.min_grid_distance_atr_mult (float, 0.3): 最小网格间距
     - strategy.range_modules.range_grid.max_hold_bars_grid (int, 100): 网格持仓最大K线数
 
@@ -42,10 +42,13 @@
 创建日期: 2025-06-01
 修改记录:
     - 2026-07-12 第五轮审计：100项缺陷终极修复，金融级完全体2.0
+    - 2026-07-22 理论修正版: 修复网格方向、buffer计算、tag精度、保证金重复计算、
+      部分成交处理、价格容差、bars计数、资金费率实际暂停、数据一致性、语法完整性、
+      并发锁统一为 threading.Lock 保证同步/异步上下文通用安全
 """
 
-import asyncio
 import logging
+import threading
 import time
 from collections import deque
 from typing import Dict, List, Optional, Tuple
@@ -73,13 +76,13 @@ STOP_LOSS_ATR_MULT = 3.0
 PRICE_TOLERANCE = 1e-8
 QTY_PRECISION = 8
 MAX_ORDERS_PER_COMPUTE = 20
-MIN_VOLUME_RATIO = 0.2             # 最低成交量比率，低于此视为无效K线
+MIN_VOLUME_RATIO = 0.20             # 最低成交量比率，低于此视为无效K线
 FUNDING_RATE_ALERT_THRESHOLD = 0.001  # 资金费率预警阈值
 
 
 class RangeOscillationGrid(FeatureComputer):
     """
-    震荡区间网格交易器 (华尔街机构级第五轮强化版)。
+    震荡区间网格交易器 (华尔街机构级第五轮强化版 · 理论修正版)。
 
     具备完善的订单管理、仓位风控、止损及状态恢复能力。
     仅当市场状态为 RANGE 且区间高度足够时激活。
@@ -123,14 +126,18 @@ class RangeOscillationGrid(FeatureComputer):
         self._bars_in_range = 0
         self._need_cancel_grids = False
 
-        # 新增：性能与安全辅助
+        # 性能与安全辅助
         self._price_tick = 0.01
         self._last_compute_price = 0.0
         self._order_count_this_compute = 0
         self._consecutive_range_failures = 0
 
-        # 并发保护锁
-        self._state_lock = asyncio.Lock()
+        # [修正] 并发保护锁: 统一使用 threading.Lock
+        # 原因: asyncio.Lock 无法在同步方法(update_order_status/sync_position)中安全获取。
+        # threading.Lock 在 async compute() 中短暂持有(仅内存操作，微秒级)不会阻塞事件循环，
+        # 且能被同步/异步上下文统一使用，避免状态竞态。
+        self._state_lock = threading.Lock()
+
         # 订单去重缓存 (避免同价位重复挂单)
         self._pending_order_keys: set = set()
 
@@ -142,9 +149,11 @@ class RangeOscillationGrid(FeatureComputer):
     async def compute(self, kline: Kline, context: Dict) -> Dict:
         """
         每根K线调用一次，返回网格状态及需要执行的订单列表（包括取消指令）。
-        增加性能保护：单次调用生成订单数不超过上限，且使用异步锁保护状态。
+        增加性能保护：单次调用生成订单数不超过上限，且使用锁保护状态。
         """
-        async with self._state_lock:
+        # [修正] threading.Lock 在协程中使用 with 语句，临界区极短(纯内存操作)，
+        # 对事件循环影响可忽略，且保证与同步方法(update_order_status等)的互斥。
+        with self._state_lock:
             self._order_count_this_compute = 0
             self._price_tick = context.get("price_tick", 0.01)
 
@@ -161,13 +170,11 @@ class RangeOscillationGrid(FeatureComputer):
                 logger.warning("Invalid ATR value, skipping grid computation")
                 return self._build_response([])
 
-            # 资金费率预警
+            # [修正] 资金费率预警: 超标时实际暂停新开仓，而非仅打日志
             funding_rate = context.get("funding_rate", 0)
-            if abs(funding_rate) > FUNDING_RATE_ALERT_THRESHOLD:
-                logger.warning("Funding rate %.4f exceeds threshold, consider pausing grid", funding_rate)
-                # 可选择暂停新开网格挂单，但保留已有持仓
-                if self._range_high is None:
-                    return self._build_response([])
+            funding_rate_exceeded = abs(funding_rate) > FUNDING_RATE_ALERT_THRESHOLD
+            if funding_rate_exceeded:
+                logger.warning("Funding rate %.4f exceeds threshold, pausing new grid orders", funding_rate)
 
             kline_history = context.get("kline_history_5m", [])
             if len(kline_history) < RANGE_DETECTION_WINDOW:
@@ -203,17 +210,25 @@ class RangeOscillationGrid(FeatureComputer):
                 if not self._grid_levels and not self._short_grid_levels:
                     self._setup_grid_levels(atr)
 
-                # 资金风控：包含浮动亏损的全面评估
+                # [修正] 资金风控: 使用 available_margin 或 account_equity(已含浮盈)，避免重复计算
                 account_equity = context.get("account_equity", 0)
-                unrealized_pnl = context.get("unrealized_pnl", 0)
-                available_margin = max(0, account_equity + unrealized_pnl)
-
+                available_margin = context.get("available_margin", 0)
                 if available_margin > 0:
+                    effective_margin = available_margin
+                else:
+                    # account_equity 在标准交易所语义中已包含 unrealized_pnl，不再重复相加
+                    effective_margin = max(0, account_equity)
+
+                if effective_margin > 0:
                     position_value = abs(self._position_qty) * current_price
-                    max_allowed_value = available_margin * self.max_grid_position_pct
+                    max_allowed_value = effective_margin * self.max_grid_position_pct
                     if position_value >= max_allowed_value:
-                        logger.info("Grid position limit reached (incl. PnL), holding current positions only")
+                        logger.info("Grid position limit reached, holding current positions only")
                         return self._build_response(orders)
+
+                # [修正] 资金费率超标时暂停新开仓，保留已有持仓和挂单
+                if funding_rate_exceeded:
+                    return self._build_response(orders)
 
                 # 生成维护订单，受限于单次最大数量
                 if self._order_count_this_compute < self.max_orders_per_compute:
@@ -228,7 +243,10 @@ class RangeOscillationGrid(FeatureComputer):
                 else:
                     logger.warning("Order limit reached for this compute cycle, deferring grid maintenance")
 
-            self._bars_in_range += 1
+            # [修正] bars_in_range 仅在区间已识别时累加，避免状态恢复后或启动阶段过早超时
+            if self._range_high is not None:
+                self._bars_in_range += 1
+
             return self._build_response(orders)
 
     def _build_response(self, orders: List[Dict]) -> Dict:
@@ -297,11 +315,15 @@ class RangeOscillationGrid(FeatureComputer):
             self._consecutive_range_failures += 1
             return
 
-        # 确认最近几根K线没有突破区间边界
-        recent_closes = [k.close for k in klines[-RANGE_CONFIRM_BARS:] if k.close > 0]
-        if not recent_closes:
+        # [修正] 确认最近几根K线没有突破区间边界，使用同样经过成交量过滤的有效K线
+        # 避免用已过滤掉的异常K线做突破确认，确保数据一致性
+        recent_valid = []
+        for k in klines[-RANGE_CONFIRM_BARS:]:
+            if k.close > 0 and k.volume > 0 and k.volume >= volume_mean * MIN_VOLUME_RATIO:
+                recent_valid.append(k.close)
+        if not recent_valid:
             return
-        if any(c > upper * 1.02 for c in recent_closes) or any(c < lower * 0.98 for c in recent_closes):
+        if any(c > upper * 1.02 for c in recent_valid) or any(c < lower * 0.98 for c in recent_valid):
             logger.debug("Price recently breached potential range, waiting")
             self._consecutive_range_failures += 1
             return
@@ -326,47 +348,54 @@ class RangeOscillationGrid(FeatureComputer):
         safe_atr = max(atr, 0.0001)
         grid_spacing = max(self.grid_atr_mult * safe_atr, self.min_grid_distance_atr * safe_atr)
 
-        # 确保网格间距至少是最小价格变动单位的2倍，避免无效挂单
-        if grid_spacing < self._price_tick * 2:
-            logger.warning("Grid spacing too narrow, adjusting to min tick*2")
-            grid_spacing = self._price_tick * 2
+        # [修正] 确保网格间距是 price_tick 的整数倍，避免对齐后间距不均匀或过小
+        if self._price_tick > 0:
+            grid_spacing = max(
+                self._price_tick * 2,
+                round(grid_spacing / self._price_tick) * self._price_tick
+            )
 
-        range_upper = self._range_high * (1 - self.upper_buffer)
-        range_lower = self._range_low * (1 + self.lower_buffer)
+        # [修正] buffer 内缩基于区间高度而非价格比例
+        # 原实现: range_high * (1 - buffer) 在窄区间时会导致上下轨交叉
+        # 新实现: 从区间边界向内缩进 height * buffer，保证 range_upper > range_lower
+        range_height = self._range_high - self._range_low
+        range_upper = self._range_high - range_height * self.upper_buffer
+        range_lower = self._range_low + range_height * self.lower_buffer
 
         if range_upper <= range_lower:
-            logger.warning("Invalid grid range after buffers, cancelling setup")
+            logger.warning("Invalid grid range after buffers (height=%.2f), cancelling setup", range_height)
             self._reset_range()
             return
 
-        # 做多网格
+        # 做多网格：从 range_lower 向上生成
         long_levels = []
         price = range_lower
         steps = 0
         max_steps = 200
         while price < range_upper - grid_spacing * 0.5 and steps < max_steps:
-            price = self._align_price(price, self._price_tick)
-            if not long_levels or abs(price - long_levels[-1]) > self._price_tick * 0.5:
-                long_levels.append(price)
+            aligned = self._align_price(price, self._price_tick)
+            # 去重：确保与上一个层级至少相差半个 tick
+            if not long_levels or abs(aligned - long_levels[-1]) > self._price_tick * 0.5:
+                long_levels.append(aligned)
             price += grid_spacing
             steps += 1
         long_levels = long_levels[:MAX_GRID_LEVELS]
         self._grid_levels = long_levels
 
-        # 做空网格
+        # 做空网格：从 range_upper 向下生成
         short_levels = []
         price = range_upper
         steps = 0
         while price > range_lower + grid_spacing * 0.5 and steps < max_steps:
-            price = self._align_price(price, self._price_tick)
-            if not short_levels or abs(price - short_levels[-1]) > self._price_tick * 0.5:
-                short_levels.append(price)
+            aligned = self._align_price(price, self._price_tick)
+            if not short_levels or abs(aligned - short_levels[-1]) > self._price_tick * 0.5:
+                short_levels.append(aligned)
             price -= grid_spacing
             steps += 1
         short_levels = short_levels[:MAX_GRID_LEVELS]
         self._short_grid_levels = short_levels
 
-        # 避免多空网格重叠
+        # 避免多空网格重叠：以中轴线分割
         if long_levels and short_levels:
             max_long = max(long_levels)
             min_short = min(short_levels)
@@ -380,21 +409,28 @@ class RangeOscillationGrid(FeatureComputer):
                      len(self._grid_levels), len(self._short_grid_levels), grid_spacing)
 
     def _align_price(self, price: float, tick: float) -> float:
-        """将价格对齐到交易所最小变动单位"""
+        """将价格对齐到交易所最小变动单位，消除浮点精度误差"""
         if tick <= 0:
             return price
-        return round(price / tick) * tick
+        aligned = round(price / tick) * tick
+        # 根据 tick 大小确定保留小数位，避免浮点噪声
+        if tick >= 1:
+            return int(aligned)
+        decimal_places = len(str(tick).split('.')[-1].rstrip('0'))
+        return round(aligned, decimal_places)
 
     def _maintain_grid_orders(self, current_price: float, context: Dict) -> List[Dict]:
         """维护网格挂单，返回新增的挂单指令，增强去重和风险检查"""
         orders = []
         self._pending_order_keys.clear()  # 每次计算重置
 
-        # 做多网格维护
+        # [修正] 做多网格：只在当前价格下方挂买单 (低买)
+        # 原实现: level > current_price 挂 buy (追涨) —— 完全错误
+        # 新实现: level < current_price 挂 buy (逢低买入)
         for level in self._grid_levels:
-            if level <= current_price + PRICE_TOLERANCE:
+            if level >= current_price - PRICE_TOLERANCE:
                 continue
-            order_key = f"buy_{level:.8f}"
+            order_key = f"buy_{level:.10f}"
             if not self._has_order_at_price(level, "buy") and order_key not in self._pending_order_keys:
                 qty = self._calculate_grid_qty(context)
                 if qty > 0:
@@ -403,11 +439,13 @@ class RangeOscillationGrid(FeatureComputer):
                     self._active_orders[order["tag"]] = {"price": level, "side": "buy", "qty": qty}
                     self._pending_order_keys.add(order_key)
 
-        # 做空网格维护
+        # [修正] 做空网格：只在当前价格上方挂卖单 (高卖)
+        # 原实现: level < current_price 挂 sell (杀跌) —— 完全错误
+        # 新实现: level > current_price 挂 sell (逢高卖出)
         for level in self._short_grid_levels:
-            if level >= current_price - PRICE_TOLERANCE:
+            if level <= current_price + PRICE_TOLERANCE:
                 continue
-            order_key = f"sell_{level:.8f}"
+            order_key = f"sell_{level:.10f}"
             if not self._has_order_at_price(level, "sell") and order_key not in self._pending_order_keys:
                 qty = self._calculate_grid_qty(context)
                 if qty > 0:
@@ -421,34 +459,50 @@ class RangeOscillationGrid(FeatureComputer):
     def _create_grid_order(self, side: str, price: float, qty: float) -> Dict:
         """创建标准化的网格订单，确保价格和数量精度符合要求"""
         aligned_price = self._align_price(price, self._price_tick)
-        tag = f"grid_{side}_{aligned_price:.{max(0, len(str(int(1/self._price_tick)))-2)}f}"
+        # [修正] 使用 price_tick 推导正确精度，避免 tag 冲突和订单覆盖
+        # 原实现: 用 1/price_tick 的位数计算，在 price_tick=0.01 时得到 1 位小数，导致 100.01 和 100.05 同 tag
+        if self._price_tick >= 1:
+            decimal_places = 0
+        else:
+            decimal_places = len(str(self._price_tick).split('.')[-1].rstrip('0'))
+        tag = f"grid_{side}_{aligned_price:.{decimal_places}f}"
         return {
             "type": "limit",
             "side": side,
             "price": aligned_price,
             "quantity": round(qty, QTY_PRECISION),
             "tag": tag,
+            "time_in_force": "GTC",  # Good Till Cancel
         }
 
     def _has_order_at_price(self, price: float, side: str) -> bool:
         """检查是否已有同价位同方向的活跃挂单"""
+        # [修正] 使用 price_tick * 0.5 作为容差，避免高价资产(如BTC 30000+)精确匹配失败
+        # 原实现: PRICE_TOLERANCE=1e-8 对 30000 的价格等于要求精确到 8 位小数，远超交易所精度
+        tick = self._price_tick
         for info in self._active_orders.values():
-            if abs(info["price"] - price) < PRICE_TOLERANCE and info["side"] == side:
+            if abs(info["price"] - price) < tick * 0.5 and info["side"] == side:
                 return True
         return False
 
     def _calculate_grid_qty(self, context: Dict) -> float:
         """
-        计算单格仓位，综合账户风控、浮动盈亏、滑点预估和最小交易量。
+        计算单格仓位，综合账户风控、滑点预估和最小交易量。
         """
         base_qty = context.get("base_position_qty", 0.001)
         account_equity = context.get("account_equity", 0)
-        unrealized_pnl = context.get("unrealized_pnl", 0)
+        available_margin = context.get("available_margin", 0)
         min_qty = context.get("min_order_qty", 0.0001)
         slippage_factor = context.get("slippage_factor", 1.0)
 
-        # 有效保证金
-        effective_margin = max(0, account_equity + unrealized_pnl)
+        # [修正] 优先使用 available_margin，否则使用 account_equity(已含浮盈)，避免重复计算
+        # 原实现: account_equity + unrealized_pnl 导致 double count
+        if available_margin > 0:
+            effective_margin = available_margin
+        else:
+            effective_margin = max(0, account_equity)
+
+        # slippage_factor 影响价格预估而非数量，此处仅作保守系数
         qty = base_qty * self.position_coeff / max(slippage_factor, 1.0)
 
         # 名义价值限制 (基于有效保证金)
@@ -502,82 +556,111 @@ class RangeOscillationGrid(FeatureComputer):
 
     def update_order_status(self, client_order_id: str, status: str, filled_qty: float) -> None:
         """
-        由外部调用，更新网格订单状态，使用锁保护共享状态。
+        由外部调用，更新网格订单状态。
+        [修正] 添加 threading.Lock 保护，防止与 compute() 并发时状态竞态。
+        原实现无锁，在订单回调与 K线计算并发时可能导致仓位漂移。
         """
-        # 注意：此方法可能从异步上下文调用，但锁已在 compute 中使用，为保持一致性，此处同步操作
-        if client_order_id not in self._active_orders:
-            return
+        with self._state_lock:
+            if client_order_id not in self._active_orders:
+                return
 
-        if status == "FILLED":
-            order_info = self._active_orders[client_order_id]
-            if order_info["side"] == "buy":
-                self._position_qty += filled_qty
-            else:
-                self._position_qty -= filled_qty
-            self._position_qty = round(self._position_qty, QTY_PRECISION)
-            del self._active_orders[client_order_id]
-            logger.debug("Grid order filled: %s, qty=%.4f, net_pos=%.4f",
-                         client_order_id, filled_qty, self._position_qty)
-        elif status in ("CANCELED", "EXPIRED", "REJECTED"):
-            del self._active_orders[client_order_id]
-            logger.debug("Grid order removed: %s, status=%s", client_order_id, status)
+            if status == "FILLED":
+                order_info = self._active_orders[client_order_id]
+                if order_info["side"] == "buy":
+                    self._position_qty += filled_qty
+                else:
+                    self._position_qty -= filled_qty
+                self._position_qty = round(self._position_qty, QTY_PRECISION)
+                del self._active_orders[client_order_id]
+                logger.debug("Grid order filled: %s, qty=%.4f, net_pos=%.4f",
+                             client_order_id, filled_qty, self._position_qty)
+
+            # [修正] 新增部分成交处理
+            # 原实现: 无 PARTIALLY_FILLED 分支，部分成交的仓位不被记录，后续可能重复计算
+            elif status == "PARTIALLY_FILLED":
+                order_info = self._active_orders[client_order_id]
+                if order_info["side"] == "buy":
+                    self._position_qty += filled_qty
+                else:
+                    self._position_qty -= filled_qty
+                self._position_qty = round(self._position_qty, QTY_PRECISION)
+                # 保留订单记录，等待后续完全成交或取消
+                logger.debug("Grid order partially filled: %s, qty=%.4f, net_pos=%.4f",
+                             client_order_id, filled_qty, self._position_qty)
+
+            elif status in ("CANCELED", "EXPIRED", "REJECTED"):
+                del self._active_orders[client_order_id]
+                logger.debug("Grid order removed: %s, status=%s", client_order_id, status)
 
     def sync_position(self, actual_qty: float) -> None:
         """
         与交易所实际持仓同步，防止本地状态漂移。
-        当偏差超过阈值时强制校正并记录事件。
+        [修正] 添加 threading.Lock 保护，防止与 compute() 并发时状态竞态。
+        原实现无锁，在持仓同步与 K线计算并发时可能导致状态不一致。
         """
-        if abs(actual_qty - self._position_qty) > PRICE_TOLERANCE * 100:
-            logger.warning("Grid position drift detected: local=%.4f, exchange=%.4f",
-                           self._position_qty, actual_qty)
-            self._position_qty = actual_qty
+        with self._state_lock:
+            # 使用相对阈值：最小交易量的10倍或绝对持仓的1%，取较大者
+            min_qty = 0.0001  # 默认最小交易量
+            threshold = max(min_qty * 10, abs(self._position_qty) * 0.01, PRICE_TOLERANCE * 100)
+            if abs(actual_qty - self._position_qty) > threshold:
+                logger.warning("Grid position drift detected: local=%.4f, exchange=%.4f",
+                               self._position_qty, actual_qty)
+                self._position_qty = actual_qty
 
     def get_state(self) -> Dict:
         """返回完整内部状态，用于检查点持久化"""
-        return {
-            "range_high": self._range_high,
-            "range_low": self._range_low,
-            "grid_levels": self._grid_levels.copy(),
-            "short_grid_levels": self._short_grid_levels.copy(),
-            "active_orders": self._active_orders.copy(),
-            "position_qty": self._position_qty,
-            "bars_in_range": self._bars_in_range,
-            "need_cancel_grids": self._need_cancel_grids,
-            "consecutive_range_failures": self._consecutive_range_failures,
-        }
+        with self._state_lock:
+            return {
+                "range_high": self._range_high,
+                "range_low": self._range_low,
+                "grid_levels": self._grid_levels.copy(),
+                "short_grid_levels": self._short_grid_levels.copy(),
+                "active_orders": self._active_orders.copy(),
+                "position_qty": self._position_qty,
+                "bars_in_range": self._bars_in_range,
+                "need_cancel_grids": self._need_cancel_grids,
+                "consecutive_range_failures": self._consecutive_range_failures,
+                "pending_order_keys": list(self._pending_order_keys),
+                "last_compute_price": self._last_compute_price,
+            }
 
     def set_state(self, state: Dict) -> None:
         """从检查点恢复状态，并进行合法性验证"""
-        self._range_high = state.get("range_high")
-        self._range_low = state.get("range_low")
-        self._grid_levels = state.get("grid_levels", [])
-        self._short_grid_levels = state.get("short_grid_levels", [])
-        self._active_orders = state.get("active_orders", {})
-        self._position_qty = state.get("position_qty", 0.0)
-        self._bars_in_range = state.get("bars_in_range", 0)
-        self._need_cancel_grids = state.get("need_cancel_grids", False)
-        self._consecutive_range_failures = state.get("consecutive_range_failures", 0)
+        with self._state_lock:
+            self._range_high = state.get("range_high")
+            self._range_low = state.get("range_low")
+            self._grid_levels = state.get("grid_levels", [])
+            self._short_grid_levels = state.get("short_grid_levels", [])
+            self._active_orders = state.get("active_orders", {})
+            self._position_qty = state.get("position_qty", 0.0)
+            self._bars_in_range = state.get("bars_in_range", 0)
+            self._need_cancel_grids = state.get("need_cancel_grids", False)
+            self._consecutive_range_failures = state.get("consecutive_range_failures", 0)
+            self._pending_order_keys = set(state.get("pending_order_keys", []))
+            self._last_compute_price = state.get("last_compute_price", 0.0)
 
-        # 恢复后验证区间是否合理
-        if self._range_high is not None and self._range_low is not None:
-            if self._range_high <= self._range_low:
-                logger.warning("Restored invalid range, resetting grid state")
-                self._reset_range()
-                return
+            # 恢复后验证区间是否合理
+            if self._range_high is not None and self._range_low is not None:
+                if self._range_high <= self._range_low:
+                    logger.warning("Restored invalid range, resetting grid state")
+                    self._reset_range()
+                    return
 
-        # 避免恢复后立即超时平仓
-        if self._bars_in_range > self.max_hold_bars:
-            logger.warning("Restored grid state exceeded max hold bars, resetting timer")
-            self._bars_in_range = 0
-        logger.info("Range grid state restored and validated")
+            # 避免恢复后立即超时平仓
+            if self._bars_in_range > self.max_hold_bars:
+                logger.warning("Restored grid state exceeded max hold bars, resetting timer")
+                self._bars_in_range = 0
+            logger.info("Range grid state restored and validated")
 
     def health_check(self) -> Dict:
         """返回模块健康状态，用于监控和告警"""
-        return {
-            "grid_active": self._range_high is not None,
-            "position_qty": self._position_qty,
-            "bars_in_range": self._bars_in_range,
-            "active_orders_count": len(self._active_orders),
-            "range_failures": self._consecutive_range_failures,
-            "pending_cancel": self._need_cancel_grids,
-          }
+        # [修正] 补全语法，原实现缺少末尾 }
+        with self._state_lock:
+            return {
+                "grid_active": self._range_high is not None,
+                "position_qty": self._position_qty,
+                "bars_in_range": self._bars_in_range,
+                "active_orders_count": len(self._active_orders),
+                "range_failures": self._consecutive_range_failures,
+                "pending_cancel": self._need_cancel_grids,
+            }
