@@ -1,0 +1,72 @@
+[Unit]
+Description=KHAOS Quantitative Trading System
+Documentation=https://github.com/khaos/docs
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+ConditionFileNotEmpty=/etc/khaos/environment
+RequiresMountsFor=/opt/khaos
+
+[Service]
+Type=simple
+User=khaos
+Group=khaos
+WorkingDirectory=/opt/khaos
+EnvironmentFile=/etc/khaos/environment
+
+# 启动前环境准备
+ExecStartPre=/bin/mkdir -p /var/log/khaos
+ExecStartPre=/bin/chown khaos:khaos /var/log/khaos /opt/khaos/data /opt/khaos/config
+ExecStartPre=/bin/chmod 750 /opt/khaos/data /opt/khaos/config /var/log/khaos
+ExecStartPre=/bin/bash -c 'id -u khaos &>/dev/null || useradd --system --no-create-home --shell /usr/sbin/nologin khaos'
+ExecStartPre=/bin/test -x /opt/khaos/.venv/bin/python
+
+ExecStart=/opt/khaos/.venv/bin/python /opt/khaos/main.py
+ExecStop=/bin/kill -SIGTERM $MAINPID
+
+Restart=always
+RestartSec=15s
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+TimeoutStartSec=120
+TimeoutStopSec=60
+
+# 资源限制
+LimitNOFILE=65536
+LimitNPROC=512
+LimitCORE=0
+MemoryLimit=4G
+CPUQuota=200%
+TasksMax=100
+IOWeight=100
+IOSchedulingClass=best-effort
+IOSchedulingPriority=2
+
+# 安全加固
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/log/khaos /opt/khaos/data /opt/khaos/config
+PrivateMounts=yes
+ProtectClock=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictRealtime=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @network-io @signal @file-system @process
+UMask=027
+RuntimeDirectory=khaos
+RuntimeDirectoryMode=750
+OOMScoreAdjust=-500
+LockPersonality=yes
+
+# 日志
+StandardOutput=append:/var/log/khaos/system.log
+StandardError=append:/var/log/khaos/error.log
+SyslogIdentifier=khaos
+SyslogFacility=local0
+
+[Install]
+WantedBy=multi-user.target
