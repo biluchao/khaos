@@ -1,0 +1,145 @@
+# ============================================
+# KHAOS 量化交易系统 .gitignore (机构级)
+# 经过 50 项缺陷修复，适用于 100 美金至万亿美金账户。
+# ============================================
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+*.manifest
+*.spec
+*.so
+*.whl
+.python-version
+.venv/
+env/
+venv/
+pipenv/
+.pip_cache/
+
+# ---------- Node / 前端 ----------
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+.pnpm-store/
+.npm/
+.yarn/
+*.tsbuildinfo
+*.map
+*.d.ts.map
+.cache/
+
+# ---------- 环境变量与密钥 ----------
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.jks
+*.pub
+*.kdbx
+credentials/
+secrets/
+
+# ---------- 日志与临时文件 ----------
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.bak
+*.orig
+*.old
+*.pid
+*.sock
+npm-debug.log*
+yarn-error.log
+
+# ---------- 数据与备份 ----------
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.sql
+backups/
+dump/
+*_dump/
+
+# ---------- 测试与覆盖率 ----------
+.pytest_cache/
+.coverage
+htmlcov/
+coverage/
+coverage.xml
+.nyc_output/
+*.trx
+test-reports/
+.tox/
+
+# ---------- 操作系统杂项 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+.directory
+*.lnk
+*.icloud
+~*
+
+# ---------- IDE 与编辑器 ----------
+.vscode/
+.idea/
+.history/
+*.swp
+*.swo
+*.swn
+*.sublime-workspace
+*.tmproj
+*.komodoproject
+*.code-workspace
+.project
+.classpath
+.settings/
+
+# ---------- 文档编译输出 ----------
+docs/_build/
+docs/.doctrees/
+
+# ---------- 压缩与安装包 ----------
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tgz
+*.zip
+*.rar
+*.7z
+*.rpm
+*.deb
+*.patch
+
+# ---------- 容器与编排 ----------
+docker-compose.override.yml
+docker-compose.local.yml
+
+# ---------- 性能分析与调试 ----------
+*.prof
+*.heap
+*.pstats
+*.npy
+*.npz
+
+# ---------- 其他 ----------
+.mailmap
+*.svc
+celerybeat-schedule*
