@@ -1,0 +1,165 @@
+# ============================================
+# KHAOS 量化交易系统 .prettierignore (机构级生产版)
+# 经 50 项缺陷修复，全面保护代码与数据文件免遭格式化破坏。
+# ============================================
+
+# ---------- 依赖与包管理目录 ----------
+node_modules/
+.pip_cache/
+.venv/
+env/
+venv/
+site-packages/
+*.egg-info/
+*.egg
+*.whl
+
+# ---------- 构建产物 ----------
+dist/
+build/
+output/
+.next/
+.nuxt/
+.gatsby/
+.svelte-kit/
+storybook-static/
+.parcel-cache/
+.esbuild/
+
+# ---------- 测试与覆盖率 ----------
+coverage/
+htmlcov/
+.nyc_output/
+.pytest_cache/
+__snapshots__/
+*.trx
+test-results/
+junit.xml
+
+# ---------- 日志与临时文件 ----------
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.out
+*.err
+npm-debug.log*
+yarn-error.log
+lerna-debug.log*
+
+# ---------- 缓存目录 ----------
+.cache/
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
+.pytype/
+.tsbuildinfo
+
+# ---------- IDE 与编辑器 ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+.project
+.classpath
+.settings/
+
+# ---------- 操作系统杂项 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+core.*
+
+# ---------- 数据库文件 ----------
+*.db
+*.sqlite
+*.sqlite3
+*.sql
+# 但需要保留迁移脚本，所以不排除 migrations/
+
+# ---------- 压缩包 ----------
+*.zip
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# ---------- 加密与密钥 ----------
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.jks
+
+# ---------- 环境变量 ----------
+.env
+.env.*
+
+# ---------- 自动生成的锁文件 ----------
+package-lock.json
+yarn.lock
+*.lock
+# 排除除了 requirements.txt 外的其他锁定文件
+!requirements.txt
+!pyproject.toml
+
+# ---------- 压缩的脚本和样式 ----------
+*.min.js
+*.min.css
+*.map
+
+# ---------- 补丁与差异文件 ----------
+*.patch
+*.diff
+*.orig
+
+# ---------- Docker 与容器编排 ----------
+docker-compose.override.yml
+docker/*
+.dockerignore
+Dockerfile*
+
+# ---------- CI/CD 与基础设施 ----------
+.github/
+.gitlab/
+.ci/
+k8s/
+helm/
+ansible/
+Vagrantfile
+terraform/
+*.tfstate*
+*.tfvars
+.serverless/
+.firebase/
+amplify/
+
+# ---------- 数据与二进制文件 ----------
+*.csv
+*.tsv
+*.parquet
+*.avro
+*.feather
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.bin
+*.dat
+*.npy
+*.npz
+
+# ---------- 自动生成的文件 ----------
+*.generated.*
+*.auto.*
+i18n/
+locales/
+
+# ---------- 前端公共资源（如已经构建好的字体/图标）----------
+# 保留它们，因为 Prettier 对非代码文件影响小，但为安全可以排除
+frontend/public/fonts/
+frontend/public/icons/
