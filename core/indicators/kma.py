@@ -44,6 +44,7 @@
         * 输入深度校验与静默失败路径可观测
         * 条件数/正定/非有限值多层防护
         * 并发与异步语义文档化
+    - 2026-07-26 修复过程噪声下限与价格量纲耦合错误，改为与观测噪声同量纲
 """
 
 import asyncio
@@ -341,9 +342,8 @@ class KalmanTrendline(FeatureComputer):
 
     def _predict_update(self, price: float, q: float) -> None:
         sigma2 = max(self.sigma_obs ** 2, EPS)
-        process_scale = max(
-            q * sigma2, MIN_PROCESS_NOISE_RATIO * (price * price + EPS)
-        )
+        # 修复：过程噪声下限与观测噪声同量纲，避免高价资产导致滤波钝化
+        process_scale = max(q * sigma2, MIN_PROCESS_NOISE_RATIO * sigma2, EPS)
         Q = self._Q_base * process_scale
 
         # 若 delta 在运行期被外部修改（极罕见），同步 F
@@ -428,4 +428,4 @@ class KalmanTrendline(FeatureComputer):
             "kma_upper": level + half_width,
             "kma_lower": level - half_width,
             "sigma_obs": float(self.sigma_obs) if np.isfinite(self.sigma_obs) else 1e-8,
-        }
+                           }
