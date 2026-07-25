@@ -1,0 +1,198 @@
+# ============================================
+# KHAOS 量化交易系统 .dockerignore (机构级生产版)
+# 经过 50 项缺陷修复，全面封堵信息泄露与攻击面。
+# ============================================
+
+# ---------- Git 与版本控制 ----------
+.git
+.gitignore
+.gitattributes
+.gitmodules
+.github/
+.gitlab/
+
+# ---------- 编辑器与 IDE 配置 ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.editorconfig
+.project
+.classpath
+.settings/
+
+# ---------- 代码风格与检查工具配置 ----------
+.prettierrc
+.prettierignore
+.eslintrc.js
+.eslintrc.json
+.eslintignore
+.tslint.json
+.stylelintrc
+.babelrc
+.browserslistrc
+
+# ---------- 文档与说明 ----------
+*.md
+docs/
+LICENSE
+CONTRIBUTING.md
+CHANGELOG.md
+AUTHORS
+
+# ---------- 环境变量与密钥 ----------
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.jks
+secrets/
+credentials/
+
+# ---------- Python 缓存与编译产物 ----------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+*.manifest
+*.spec
+.python-version
+
+# ---------- 虚拟环境 ----------
+.venv/
+env/
+venv/
+pipenv/
+.conda/
+
+# ---------- 依赖缓存 ----------
+node_modules/
+.pip_cache/
+.npm/
+.yarn/
+*.lock  # 保留 package-lock.json 和 requirements.txt，在 Dockerfile 中显式 COPY
+!package-lock.json
+!requirements.txt
+
+# ---------- 前端 ----------
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.cache/
+frontend/*.log
+frontend/src/          # 构建后源码不需要保留在最终上下文（但构建阶段仍需，故在构建阶段采用分阶段复制）
+frontend/public/       # 仅保留图标等必要静态资源，构建时会处理
+!frontend/public/favicon.ico
+!frontend/public/manifest.json
+!frontend/public/icons/
+!frontend/public/fonts/
+!frontend/public/css/  # 仅首屏关键样式保留，其余构建产生
+
+# ---------- 测试与覆盖率 ----------
+tests/
+__tests__/
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+.nyc_output/
+*.trx
+test-reports/
+
+# ---------- 日志、临时与备份文件 ----------
+*.log
+*.err
+*.out
+logs/
+log/
+tmp/
+temp/
+*.tmp
+*.bak
+*.orig
+*.old
+*.pid
+*.sock
+
+# ---------- 数据文件（运行时生成） ----------
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.dbf
+backups/
+dump/
+
+# ---------- CI/CD 与容器编排 ----------
+.gitlab-ci.yml
+.drone.yml
+Jenkinsfile
+.travis.yml
+.github/
+.ci/
+docker-compose*.yml
+docker-compose.override.yml
+Dockerfile*
+.dockerignore
+docker/
+
+# ---------- 压缩包与安装包 ----------
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.rar
+*.7z
+
+# ---------- 性能分析与调试 ----------
+*.prof
+*.heap
+*.npy
+*.npz
+*.pstats
+*.pyprof
+
+# ---------- 操作系统杂项 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# ---------- 项目特定排除 ----------
+# 排除开发用脚本
+scripts/run_windows.bat
+scripts/install_systemd.sh
+scripts/deploy_prod.sh
+scripts/setup_env.sh
+scripts/fetch_fonts.sh
+# 排除不需要的迁移文件（若使用数据库，保留最新即可）
+alembic/versions/*.py
+!alembic/versions/__init__.py
+
+# 排除示例配置
+config/*.example
+config/*.sample
+
+# 排除本地环境特定配置
+*.local
+*.development
+*.staging
+
+# ---------- 其他潜在敏感文件 ----------
+*.keytab
+*.kdb
+*.cer
+*.der
+*.p7b
+*.p7c
+*.spc
+*.crl
+*.csr
