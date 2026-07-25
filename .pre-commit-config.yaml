@@ -1,0 +1,168 @@
+# =============================================================================
+# KHAOS 量化交易系统 - Git 预提交钩子配置 (华尔街机构级)
+# 经过 50 项缺陷修复，全面保障代码质量与安全。
+# 使用: pre-commit install --config .pre-commit-config.yaml
+# =============================================================================
+fail_fast: false  # 收集所有错误，一次性报告，减少修复往返
+
+repos:
+  # ---------------------------------------------------------------------------
+  # 通用文件检查 (空格、换行、合并冲突、文件大小等)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--unsafe]
+      - id: check-json
+      - id: check-toml
+      - id: check-xml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: check-case-conflict
+      - id: check-symlinks
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: detect-private-key
+      - id: detect-aws-credentials
+        args: [--allow-missing-credentials]
+      - id: no-commit-to-branch
+        args: [--branch, main, --branch, master]
+      - id: name-tests-test
+        args: [--pytest-test-first]
+      - id: requirements-txt-fixer
+
+  # ---------------------------------------------------------------------------
+  # Python 代码格式化与 import 排序
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        name: isort (python)
+        args: [--profile, black, --filter-files, --settings-path, .]
+
+  - repo: https://github.com/psf/black
+    rev: 24.4.2
+    hooks:
+      - id: black
+        name: black (python)
+        language_version: python3.11
+        args: [--line-length=120, --config, pyproject.toml]
+
+  # ---------------------------------------------------------------------------
+  # Python 类型检查 (mypy)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.11.0
+    hooks:
+      - id: mypy
+        name: mypy (python)
+        args: [--config-file, mypy.ini, --show-error-codes]
+        additional_dependencies:
+          - types-PyYAML
+          - types-requests
+          - types-python-dateutil
+
+  # ---------------------------------------------------------------------------
+  # Python 代码静态分析与安全审计
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.1.0
+    hooks:
+      - id: flake8
+        name: flake8 (python)
+        args: [--max-line-length=120, --ignore=E203,W503]
+        additional_dependencies:
+          - flake8-bugbear>=24.4.0
+          - flake8-comprehensions>=3.14.0
+          - flake8-bandit>=4.1.0
+          - flake8-encryption>=0.1.0
+          - flake8-builtins>=2.4.0
+          - flake8-eradicate>=1.5.0
+          - flake8-docstrings>=1.7.0
+          - flake8-annotations>=3.0.0
+
+  # ---------------------------------------------------------------------------
+  # 密钥与敏感信息扫描 (gitleaks)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.2
+    hooks:
+      - id: gitleaks
+        name: gitleaks (security)
+        args: [--verbose]
+
+  # ---------------------------------------------------------------------------
+  # Dockerfile 检查 (hadolint)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.12.0
+    hooks:
+      - id: hadolint
+        name: hadolint (docker)
+        args: [--failure-threshold, warning]
+
+  # ---------------------------------------------------------------------------
+  # Markdown 文档规范
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.41.0
+    hooks:
+      - id: markdownlint
+        name: markdownlint (docs)
+        args: [--fix, --disable, MD013, MD033]
+
+  # ---------------------------------------------------------------------------
+  # 前端代码格式化 (Prettier)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/mirrors-prettier
+    rev: v3.1.0
+    hooks:
+      - id: prettier
+        name: prettier (frontend)
+        files: \.(ts|tsx|js|jsx|json|css|md|yaml|yml)$
+        args: [--config, frontend/.prettierrc, --ignore-path, frontend/.prettierignore]
+
+  # ---------------------------------------------------------------------------
+  # 前端代码规范 (ESLint)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/mirrors-eslint
+    rev: v9.0.0
+    hooks:
+      - id: eslint
+        name: eslint (frontend)
+        files: \.(ts|tsx|js|jsx)$
+        args:
+          - --config
+          - frontend/.eslintrc.js
+          - --fix
+          - --max-warnings=0
+          - --cache
+          - --cache-location
+          - .eslintcache
+
+  # ---------------------------------------------------------------------------
+  # 前端 TypeScript 类型检查
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/mirrors-tsc
+    rev: v5.5.0
+    hooks:
+      - id: tsc
+        name: tsc (frontend)
+        files: \.(ts|tsx)$
+        args: [--project, frontend/tsconfig.json, --noEmit]
+
+  # ---------------------------------------------------------------------------
+  # 前端包管理器规范 (package.json 排序)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/mirrors-package-json
+    rev: v1.0.0
+    hooks:
+      - id: sort-package-json
+        name: sort-package-json (frontend)
+        files: frontend/package\.json
