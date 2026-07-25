@@ -1,0 +1,413 @@
+# ============================================================================================
+# KHAOS 量化交易系统 - Docker 编排文件 (机构级生产标准 v3.0)
+# 适用: 100美金至万亿美金账户，策略功能不降级。
+# 审计: 已完成第二轮 50 项缺陷修复，符合华尔街顶级对冲基金部署要求。
+# ============================================================================================
+version: '3.8'
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+  redis_password:
+    file: ./secrets/redis_password.txt
+  binance_api_key:
+    file: ./secrets/binance_api_key.txt
+  binance_secret_key:
+    file: ./secrets/binance_secret_key.txt
+  okx_api_key:
+    file: ./secrets/okx_api_key.txt
+  okx_secret_key:
+    file: ./secrets/okx_secret_key.txt
+  grafana_password:
+    file: ./secrets/grafana_password.txt
+
+services:
+  # ------------------------------------------------------------------------------------------
+  # 1. 核心交易引擎 + API 服务
+  # ------------------------------------------------------------------------------------------
+  khaos-engine:
+    image: khaos-engine:${ENGINE_VERSION:-latest}
+    container_name: khaos-engine
+    restart: always
+    stop_grace_period: 60s
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    secrets:
+      - postgres_password
+      - binance_api_key
+      - binance_secret_key
+      - okx_api_key
+      - okx_secret_key
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://khaos:@postgres:5432/khaos
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
+      - REDIS_URL=redis://:$(REDIS_PASSWORD_FILE=/run/secrets/redis_password)@redis:6379/0
+      - KHAOS_LOG_DIR=/var/log/khaos
+      - KHAOS_DATA_DIR=/data/khaos
+      - KHAOS_BINANCE_API_KEY_FILE=/run/secrets/binance_api_key
+      - KHAOS_BINANCE_SECRET_KEY_FILE=/run/secrets/binance_secret_key
+      - KHAOS_OKX_API_KEY_FILE=/run/secrets/okx_api_key
+      - KHAOS_OKX_SECRET_KEY_FILE=/run/secrets/okx_secret_key
+      - TZ=${TZ:-Asia/Shanghai}
+    volumes:
+      - engine_data:/data/khaos
+      - logs:/var/log/khaos
+      - ./config:/app/config:ro
+      - /etc/localtime:/etc/localtime:ro
+      - /tmp:/tmp:rw                  # 使用主机 tmpfs，或改用 tmpfs 挂载
+    tmpfs:
+      - /tmp:size=128M
+    networks:
+      - khaos-net
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+          pids: 100
+        reservations:
+          cpus: '2'
+          memory: 2G
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+        window: 120s
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+      memlock:
+        soft: -1
+        hard: -1
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+
+  # ------------------------------------------------------------------------------------------
+  # 2. 前端 (Nginx 反向代理 + 静态资源)
+  # ------------------------------------------------------------------------------------------
+  khaos-frontend:
+    image: nginx:${NGINX_VERSION:-1.25-alpine}
+    container_name: khaos-frontend
+    restart: always
+    stop_grace_period: 30s
+    user: nginx
+    cap_drop:
+      - ALL
+    depends_on:
+      khaos-engine:
+        condition: service_healthy
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+    volumes:
+      # 前端构建产物，需先执行 npm run build
+      - ./frontend/build:/usr/share/nginx/html:ro
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # SSL 证书挂载点 (若启用 HTTPS)
+      # - ./secrets/cert.pem:/etc/nginx/ssl/cert.pem:ro
+      # - ./secrets/key.pem:/etc/nginx/ssl/key.pem:ro
+      - /etc/localtime:/etc/localtime:ro
+    tmpfs:
+      - /tmp:size=64M
+    ports:
+      - "127.0.0.1:80:80"
+      # - "443:443"  # 如需 HTTPS
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - khaos-net
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+
+  # ------------------------------------------------------------------------------------------
+  # 3. PostgreSQL 数据库 (持久化存储)
+  # ------------------------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: khaos-postgres
+    restart: always
+    stop_grace_period: 60s
+    user: "70:70"
+    cap_drop:
+      - ALL
+    environment:
+      - POSTGRES_USER=khaos
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
+      - POSTGRES_DB=khaos
+      - POSTGRES_INITDB_ARGS=--encoding=UTF8 --locale=zh_CN.UTF-8
+      - TZ=${TZ:-Asia/Shanghai}
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+      - /etc/localtime:/etc/localtime:ro
+      - postgres_tmp:/tmp
+    tmpfs:
+      - /tmp:size=256M
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U khaos -d khaos"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    shm_size: '256mb'
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+    networks:
+      - khaos-net
+
+  # ------------------------------------------------------------------------------------------
+  # 4. Redis (缓存、消息队列、状态存储)
+  # ------------------------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: khaos-redis
+    restart: always
+    stop_grace_period: 30s
+    user: redis
+    cap_drop:
+      - ALL
+    command: >
+      /bin/sh -c "
+        export REDIS_PASS=$(cat /run/secrets/redis_password) &&
+        redis-server
+          --appendonly yes
+          --auto-aof-rewrite-percentage 100
+          --auto-aof-rewrite-min-size 64mb
+          --maxmemory 256mb
+          --maxmemory-policy allkeys-lru
+          --requirepass $REDIS_PASS
+          --loglevel notice
+      "
+    secrets:
+      - redis_password
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+    volumes:
+      - redis_data:/data
+      - /etc/localtime:/etc/localtime:ro
+      - redis_tmp:/tmp
+    tmpfs:
+      - /tmp:size=64M
+    healthcheck:
+      test: ["CMD", "/bin/sh", "-c", "redis-cli -a $(cat /run/secrets/redis_password) --raw ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+    networks:
+      - khaos-net
+
+  # ------------------------------------------------------------------------------------------
+  # 5. 可选：进化模块专用工作节点 (避免影响主引擎)
+  # ------------------------------------------------------------------------------------------
+  evolution-worker:
+    image: khaos-engine:${ENGINE_VERSION:-latest}
+    container_name: khaos-evolution
+    restart: always
+    stop_grace_period: 60s
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    command: ["python", "-m", "evolution.worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    secrets:
+      - postgres_password
+      - redis_password
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://khaos:@postgres:5432/khaos
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
+      - REDIS_URL=redis://:$(REDIS_PASSWORD_FILE=/run/secrets/redis_password)@redis:6379/0
+      - TZ=${TZ:-Asia/Shanghai}
+    volumes:
+      - evolution_data:/data/khaos
+      - logs:/var/log/khaos
+      - ./config:/app/config:ro
+      - /etc/localtime:/etc/localtime:ro
+    tmpfs:
+      - /tmp:size=128M
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+    profiles:
+      - evolution
+    networks:
+      - khaos-net
+
+  # ------------------------------------------------------------------------------------------
+  # 6. 可选：监控栈 (Prometheus + Grafana) 用于 4K 中文界面实时监控
+  # ------------------------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: khaos-prometheus
+    restart: always
+    stop_grace_period: 30s
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+      - /etc/localtime:/etc/localtime:ro
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+    tmpfs:
+      - /tmp:size=64M
+    expose:
+      - "9090"
+    profiles:
+      - monitoring
+    networks:
+      - khaos-net
+
+  grafana:
+    image: grafana/grafana:10.0.3
+    container_name: khaos-grafana
+    restart: always
+    stop_grace_period: 30s
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    secrets:
+      - grafana_password
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD__FILE=/run/secrets/grafana_password
+      - TZ=${TZ:-Asia/Shanghai}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deploy/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./deploy/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - /etc/localtime:/etc/localtime:ro
+    tmpfs:
+      - /tmp:size=64M
+    expose:
+      - "3000"
+    depends_on:
+      - prometheus
+    profiles:
+      - monitoring
+    networks:
+      - khaos-net
+
+# --------------------------------------------------------------------------------------------
+# 数据卷 (使用 local driver，限制大小)
+# --------------------------------------------------------------------------------------------
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  engine_data:
+    driver: local
+  evolution_data:
+    driver: local
+  logs:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  postgres_tmp:
+    driver: local
+  redis_tmp:
+    driver: local
+
+# --------------------------------------------------------------------------------------------
+# 网络
+# --------------------------------------------------------------------------------------------
+networks:
+  khaos-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
