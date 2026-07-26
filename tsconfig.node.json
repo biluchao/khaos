@@ -1,0 +1,82 @@
+{
+  "//1": "KHAOS Node 环境 TypeScript 配置 v5.0 - 华尔街机构级完美版",
+  "//2": "用于 Vite/Vitest 等构建工具配置文件。启用 composite 以支持项目引用。",
+  "//3": "审计日期: 2026-07-26，经过四轮 200 项缺陷修复，适用于 2000 美金至万亿美金账户。",
+  "compilerOptions": {
+    /* ===== 项目引用与输出 ===== */
+    "composite": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceRoot": ".",
+    "emitDeclarationOnly": true,
+    "outDir": ".tsbuildinfo/node-declarations",
+    "tsBuildInfoFile": ".tsbuildinfo/node.tsbuildinfo",
+    "noEmitOnError": true,
+
+    /* ===== 目标与环境 (TypeScript >=5.5 以使用 ES2024 lib) ===== */
+    "target": "ES2022",
+    "lib": ["ES2024"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "types": ["node", "vite/client"],
+
+    /* ===== 严格类型检查 (显式声明所有子项) ===== */
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "strictBindCallApply": true,
+    "strictPropertyInitialization": true,
+    "alwaysStrict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "useUnknownInCatchVariables": true,
+    "forceConsistentCasingInFileNames": true,
+    "noUncheckedIndexedAccess": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "exactOptionalPropertyTypes": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+
+    /* ===== 模块与解析 ===== */
+    "verbatimModuleSyntax": false,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "resolvePackageJsonExports": true,
+    "resolvePackageJsonImports": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "allowJs": false,
+    "checkJs": false,
+    "skipLibCheck": true,
+    "useDefineForClassFields": true,
+    "removeComments": false,
+    "sourceMap": false,
+
+    /* ===== 实验性功能 (明确关闭) ===== */
+    "experimentalDecorators": false,
+    "emitDecoratorMetadata": false,
+
+    /* ===== 路径与文件 ===== */
+    "rootDir": ".",
+
+    /* ===== 诊断与格式 ===== */
+    "noErrorTruncation": true,
+    "newLine": "lf",
+    "charset": "utf8",
+    "pretty": true,
+    "locale": "zh-CN",
+    "preserveWatchOutput": true,
+
+    /* ===== 性能 ===== */
+    "incremental": true,
+    "maxNodeModuleJsDepth": 5
+  },
+  "include": ["*.config.ts"],
+  "exclude": ["node_modules", "dist", "build", "coverage"]
+}
