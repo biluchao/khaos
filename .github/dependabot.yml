@@ -1,34 +1,223 @@
+# =============================================================================
+# KHAOS 依赖自动更新配置 (华尔街机构级终极版)
+# 涵盖 Python、前端 npm、GitHub Actions、Docker，实施分级安全策略。
+# 所有安全补丁自动合并（需 CI 通过），常规更新保留人工审核。
+# =============================================================================
 version: 2
 updates:
+  # -------------------------------------------------------------------------
+  # Python (pip) 安全更新 - 每日，自动合并
+  # -------------------------------------------------------------------------
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      time: "05:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5             # 限制同时打开的 PR 数量，避免审阅疲劳
+    versioning-strategy: lockfile-only
+    allow:
+      - dependency-type: "direct"
+        update-types: ["patch"]             # 仅直接依赖的补丁
+    labels:
+      - "security"
+      - "dependabot"
+      - "python"
+    reviewers:
+      - "khaos-backend-team"                # 确保是 GitHub 团队或具体用户
+    assignees:
+      - "security-officer"
+    commit-message:
+      prefix: "security(pip)"
+      include: "scope"
+    target-branch: "develop"
+    milestone: "security-fixes"
+    allow-prereleases: false
+    rebase-strategy: auto                   # 自动变基
+    auto-merge: true                        # 启用自动合并（需配合 branch protection 规则）
+    pull-request-branch-name:
+      separator: "-"
+
+  # -------------------------------------------------------------------------
+  # Python (pip) 常规依赖更新 - 每周，人工审核
+  # -------------------------------------------------------------------------
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "monday"
-      time: "09:00"
-      timezone: "Asia/Shanghai"
-    open-pull-requests-limit: 5
+      day: "wednesday"
+      time: "03:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 3             # 更少，因为需要人工审核
+    versioning-strategy: increase-if-necessary
+    ignore:
+      # 核心科学计算库大版本升级需要单独测试
+      - dependency-name: "numpy"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "pandas"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "scipy"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "scikit-learn"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "hmmlearn"
+        update-types: ["version-update:semver-major"]
+      # 框架和工具大版本
+      - dependency-name: "fastapi"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "sqlalchemy"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "alembic"
+        update-types: ["version-update:semver-major"]
     labels:
       - "dependencies"
+      - "dependabot"
       - "python"
     reviewers:
       - "khaos-backend-team"
+    assignees:
+      - "devops"
+    commit-message:
+      prefix: "chore(pip)"
+      include: "scope"
+    target-branch: "develop"
+    allow-prereleases: false
+    milestone: "dependency-updates"
+    pull-request-branch-name:
+      separator: "-"
 
+  # -------------------------------------------------------------------------
+  # 前端 npm 安全更新
+  # -------------------------------------------------------------------------
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "daily"
+      time: "05:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    versioning-strategy: lockfile-only
+    allow:
+      - dependency-type: "direct"
+        update-types: ["patch"]
+    labels:
+      - "security"
+      - "dependabot"
+      - "frontend"
+    reviewers:
+      - "khaos-frontend-team"
+    assignees:
+      - "security-officer"
+    commit-message:
+      prefix: "security(npm)"
+      include: "scope"
+    target-branch: "develop"
+    allow-prereleases: false
+    rebase-strategy: auto
+    auto-merge: true
+    pull-request-branch-name:
+      separator: "-"
+
+  # -------------------------------------------------------------------------
+  # 前端 npm 常规更新
+  # -------------------------------------------------------------------------
   - package-ecosystem: "npm"
     directory: "/frontend"
     schedule:
       interval: "weekly"
-      day: "monday"
-      time: "09:00"
-      timezone: "Asia/Shanghai"
-    open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "frontend"
-    reviewers:
-      - "khaos-frontend-team"
+      day: "wednesday"
+      time: "03:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 3
+    versioning-strategy: increase-if-necessary
     ignore:
+      # 框架大版本
       - dependency-name: "react"
         update-types: ["version-update:semver-major"]
       - dependency-name: "react-dom"
         update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react-dom"
+        update-types: ["version-update:semver-major"]
+      # 构建工具
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "vite"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "eslint"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@typescript-eslint/parser"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@typescript-eslint/eslint-plugin"
+        update-types: ["version-update:semver-major"]
+      # UI 库
+      - dependency-name: "antd"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "echarts"
+        update-types: ["version-update:semver-major"]
+    labels:
+      - "dependencies"
+      - "dependabot"
+      - "frontend"
+    reviewers:
+      - "khaos-frontend-team"
+    assignees:
+      - "devops"
+    commit-message:
+      prefix: "chore(npm)"
+      include: "scope"
+    target-branch: "develop"
+    allow-prereleases: false
+    pull-request-branch-name:
+      separator: "-"
+
+  # -------------------------------------------------------------------------
+  # GitHub Actions 工作流依赖
+  # -------------------------------------------------------------------------
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+      time: "03:00"
+      timezone: "Etc/UTC"
+    versioning-strategy: increase-if-necessary
+    ignore:
+      - dependency-name: "actions/*"
+        update-types: ["version-update:semver-major"]
+    labels:
+      - "dependencies"
+      - "dependabot"
+      - "ci"
+    commit-message:
+      prefix: "ci(actions)"
+      include: "scope"
+    pull-request-branch-name:
+      separator: "-"
+
+  # -------------------------------------------------------------------------
+  # Docker 基础镜像
+  # -------------------------------------------------------------------------
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+      time: "03:00"
+      timezone: "Etc/UTC"
+    versioning-strategy: increase-if-necessary
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
+    labels:
+      - "dependencies"
+      - "dependabot"
+      - "docker"
+    commit-message:
+      prefix: "chore(docker)"
+      include: "scope"
+    pull-request-branch-name:
+      separator: "-"
