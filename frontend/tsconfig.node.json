@@ -1,31 +1,63 @@
 {
+  "//": "KHAOS Node 环境 TypeScript 配置 v2.0 - 华尔街机构级标准。用于 Vite/Vitest 配置文件。",
   "compilerOptions": {
+    /* ===== 目标与环境 ===== */
     "target": "ES2022",
-    "module": "ES2022",
-    "moduleResolution": "node16",
-    "esModuleInterop": true,
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "types": ["node", "vite/client"],
+
+    /* ===== 严格类型检查 (显式声明所有子项) ===== */
     "strict": true,
-    "skipLibCheck": false,
-    "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "noEmit": true,
-    "types": ["node"],
-    "typeRoots": ["./node_modules/@types"],
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "strictBindCallApply": true,
+    "strictPropertyInitialization": true,
+    "alwaysStrict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noImplicitReturns": true,
+    "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
+    "useUnknownInCatchVariables": true,
+    "forceConsistentCasingInFileNames": true,
     "noUncheckedIndexedAccess": true,
+    "noPropertyAccessFromIndexSignature": true,
     "exactOptionalPropertyTypes": true,
-    "noErrorTruncation": true,
-    "preserveWatchOutput": true,
-    "diagnostics": true,
-    "extendedDiagnostics": true,
-    "declaration": false,
+
+    /* ===== 模块与输出 ===== */
+    "verbatimModuleSyntax": false,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "useDefineForClassFields": true,
+    "noEmit": true,
+    "removeComments": false,
     "sourceMap": false,
+
+    /* ===== 路径与文件 ===== */
+    "rootDir": ".",
+
+    /* ===== 诊断与格式 ===== */
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+    "noErrorTruncation": true,
+    "newLine": "lf",
+    "charset": "utf8",
+    "pretty": true,
+    "locale": "zh-CN",
+    "preserveWatchOutput": true,
+
+    /* ===== 性能 ===== */
     "incremental": true,
-    "tsBuildInfoFile": "./node_modules/.cache/tsconfig.node.tsbuildinfo"
+    "tsBuildInfoFile": ".tsbuildinfo/node.tsbuildinfo"
   },
-  "include": ["vite.config.ts", "vitest.config.ts", "scripts/**/*.ts"]
+  "include": ["vite.config.ts", "vitest.config.ts"],
+  "exclude": ["node_modules", "dist", "build", "coverage"]
 }
