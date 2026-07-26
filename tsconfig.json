@@ -1,0 +1,85 @@
+{
+  "//1": "KHAOS 前端 TypeScript 配置 v4.0 - 华尔街机构级标准",
+  "//2": "要求 TypeScript >=5.0。所有别名需在 vite.config.ts 中同步配置 resolve.alias。",
+  "compilerOptions": {
+    /* ===== 目标与模块 ===== */
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "useDefineForClassFields": true,
+    "verbatimModuleSyntax": false,
+
+    /* ===== 路径与解析 ===== */
+    "rootDir": "./src",
+    "baseUrl": "./src",
+    "paths": {
+      "@/*": ["./*"],
+      "@components/*": ["components/*"],
+      "@hooks/*": ["hooks/*"],
+      "@utils/*": ["utils/*"],
+      "@store/*": ["store/*"],
+      "@types/*": ["types/*"],
+      "@assets/*": ["assets/*"]
+    },
+    "typeRoots": ["./node_modules/@types", "./src/types"],
+    "resolveJsonModule": true,
+    "resolvePackageJsonExports": true,
+    "resolvePackageJsonImports": true,
+    "allowImportingTsExtensions": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+
+    /* ===== 输出控制 ===== */
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "importHelpers": true,
+    "removeComments": false,
+    "sourceMap": false,
+
+    /* ===== 严格类型检查 (华尔街级) ===== */
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "strictBindCallApply": true,
+    "strictPropertyInitialization": true,
+    "alwaysStrict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "useUnknownInCatchVariables": true,
+    "forceConsistentCasingInFileNames": true,
+    "noUncheckedIndexedAccess": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "exactOptionalPropertyTypes": true,
+
+    /* ===== 风格与安全性 ===== */
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+    "allowJs": false,
+    "skipLibCheck": false,
+    "noErrorTruncation": true,
+    "newLine": "lf",
+    "charset": "utf8",
+    "emitBOM": false,
+
+    /* ===== 性能与诊断 ===== */
+    "incremental": true,
+    "tsBuildInfoFile": ".tsbuildinfo/tsconfig.tsbuildinfo",
+    "maxNodeModuleJsDepth": 0,
+    "preserveWatchOutput": true,
+    "diagnostics": false,
+    "extendedDiagnostics": false,
+    "listEmittedFiles": false,
+    "pretty": true,
+    "locale": "zh-CN"
+  },
+  "include": ["src"],
+  "exclude": ["node_modules", "dist", "build", "coverage", "scripts", ".cache", ".storybook"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}
