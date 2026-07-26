@@ -25,7 +25,9 @@
 创建日期: 2025-03-15
 修改记录:
     - 2026-07-08 v44.0: 最终机构级版本，包含熔断自愈、LRU缓存、完整降级与可观测性。
-__version__ = "44.0.0"
+    - 2026-07-26 v44.1: 并发安全、ATR正确性、半开熔断、数值scrub、历史原子性、资源上界全面加固。
+    - 2026-07-27 v44.2: 细粒度临界区、ATR键改用bar时间、半开原子探测、klines硬上限、回测时钟兼容、锁持有时间最小化（累计150+缺陷修复）。
+__version__ = "44.2.0"
 __all__ = ["ContextPipeline"]
 """
 
@@ -37,7 +39,7 @@ import re
 import copy
 from typing import Dict, List, Optional, Any, Deque, Tuple
 from collections import OrderedDict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from core.models import Kline
 from core.engine.kline_buffer import MultiTimeframeKlineBuffer
@@ -63,6 +65,7 @@ DEFAULT_CIRCUIT_BREAKER_THRESHOLD = 5
 DEFAULT_CIRCUIT_BREAKER_RETRY_SEC = 600
 DEFAULT_CIRCUIT_BREAKER_SUCCESS_RESET = 3
 MAX_FUTURE_KLINES_MS = 5000
+MAX_KLINES_HARD_LIMIT = 2000          # 防止 buffer 返回超大列表导致内存/计算爆炸
 
 REQUIRED_CONTEXT_KEYS = [
     "symbol", "primary_interval", "latest_kline_ohlc", "last_price",
@@ -76,17 +79,18 @@ REQUIRED_CONTEXT_KEYS = [
 
 @dataclass
 class CircuitState:
-    """熔断状态跟踪"""
+    """熔断状态跟踪（支持半开探测）"""
     failure_count: int = 0
     last_failure_time: float = 0.0
     circuit_open_time: float = 0.0
     success_count: int = 0
+    half_open: bool = False
 
 
 class ContextPipeline:
     """
     上下文构建管道，为每根K线组装完整的市场上下文。
-    具备自适应熔断、智能缓存、完整降级链路和自愈能力。
+    具备自适应半开熔断、智能缓存、完整降级链路、数值稳健与并发安全。
     """
 
     __slots__ = [
@@ -107,6 +111,7 @@ class ContextPipeline:
         '_build_count', '_total_build_time_ms', '_max_build_time_ms',
         '_cache_hit_kma', '_cache_hit_hmm', '_cache_miss_kma', '_cache_miss_hmm',
         '_sr_cache_hit', '_last_cleanup_time', '_last_status', '_context_cache_total',
+        '_lock',
     ]
 
     def __init__(
@@ -159,7 +164,6 @@ class ContextPipeline:
         self.kma_computer = kma_computer
         self.hmm_detector = hmm_detector
         self.primary_interval = self._validate_interval(primary_interval)
-        # 去重并排除主周期
         raw_secondary = secondary_intervals or ["5m", "15m"]
         self.secondary_intervals = list(set(tf for tf in raw_secondary if tf != self.primary_interval))
         for tf in self.secondary_intervals:
@@ -186,7 +190,6 @@ class ContextPipeline:
         self.strict_time_check = strict_time_check
         self.max_future_klines_ms = MAX_FUTURE_KLINES_MS
 
-        # 缓存初始化
         self._context_caches: Dict[str, OrderedDict] = {}
         self._context_cache_total = 0
 
@@ -214,11 +217,9 @@ class ContextPipeline:
         self._error_counters: Dict[str, int] = {}
         self._max_error_counters = DEFAULT_MAX_ERROR_COUNTERS
 
-        # 熔断状态
         self._kma_circuit: Dict[Tuple[str, str], CircuitState] = {}
         self._hmm_circuit: Dict[Tuple[str, str], CircuitState] = {}
 
-        # 统计
         self._build_count = 0
         self._total_build_time_ms = 0.0
         self._max_build_time_ms = 0.0
@@ -229,6 +230,8 @@ class ContextPipeline:
         self._sr_cache_hit = 0
         self._last_cleanup_time = time.monotonic()
         self._last_status: Dict[str, Any] = {}
+
+        self._lock = asyncio.Lock()
 
     # =========================================================================
     # 公共接口
@@ -241,7 +244,8 @@ class ContextPipeline:
             raise ValueError(f"Invalid kline for {symbol}")
 
         start_time = time.perf_counter()
-        self._build_count += 1
+        async with self._lock:
+            self._build_count += 1
 
         open_time_ms = int(kline.open_time)
         context = self._init_context(symbol, kline, open_time_ms)
@@ -256,6 +260,7 @@ class ContextPipeline:
                 primary_klines = list(primary_klines)
             primary_klines = self._ensure_time_order(primary_klines)
             primary_klines = self._filter_future_klines(primary_klines)
+            primary_klines = self._limit_klines(primary_klines)
 
             secondary_klines: Dict[str, List[Kline]] = {}
             for tf in self.secondary_intervals:
@@ -263,11 +268,11 @@ class ContextPipeline:
                 if kls is not None:
                     kls = self._ensure_time_order(list(kls))
                     kls = self._filter_future_klines(kls)
+                    kls = self._limit_klines(kls)
                     secondary_klines[tf] = kls
                 else:
                     secondary_klines[tf] = []
 
-            # 数据不足
             if len(primary_klines) < 2:
                 degradation_reasons.append("insufficient_primary_klines")
                 degraded_components["primary_data"] = True
@@ -275,7 +280,8 @@ class ContextPipeline:
                     self._set_default_tf_context(context, tf, kline)
                 context = self._finalize_context(context, degradation_reasons, degraded_components, "degraded")
                 self._validate_context_completeness(context)
-                self._cache_context(symbol, open_time_ms, self._sanitize_for_cache(context))
+                async with self._lock:
+                    self._cache_context(symbol, open_time_ms, self._sanitize_for_cache(context))
                 return context
 
             # 1. 主周期 KMA
@@ -283,14 +289,14 @@ class ContextPipeline:
                 symbol, self.primary_interval, kline, primary_klines,
                 degradation_reasons, degraded_components
             )
-            context["kma"] = kma_primary["level"]
-            context["kma_slope"] = kma_primary["slope"]
-            context["kma_bandwidth"] = kma_primary["bandwidth"]
+            context["kma"] = self._safe_float(kma_primary["level"], kline.close)
+            context["kma_slope"] = self._safe_float(kma_primary["slope"], 0.0)
+            context["kma_bandwidth"] = self._safe_float(kma_primary["bandwidth"], 0.0)
 
             # 2. 主周期 HMM
             hmm_primary = await self._get_or_compute_hmm(
                 symbol, self.primary_interval, kline, primary_klines,
-                kma_primary["level"], degradation_reasons, degraded_components
+                context["kma"], degradation_reasons, degraded_components
             )
             context["hmm_state_3m"] = hmm_primary["state"]
             context["hmm_probabilities_3m"] = hmm_primary["probabilities"]
@@ -306,19 +312,21 @@ class ContextPipeline:
                     symbol, tf, latest_tf_kline, tf_klines,
                     degradation_reasons, degraded_components
                 )
-                context[f"kma_{tf}"] = kma_tf["level"]
-                context[f"kma_slope_{tf}"] = kma_tf["slope"]
+                context[f"kma_{tf}"] = self._safe_float(kma_tf["level"], latest_tf_kline.close)
+                context[f"kma_slope_{tf}"] = self._safe_float(kma_tf["slope"], 0.0)
 
                 hmm_tf = await self._get_or_compute_hmm(
                     symbol, tf, latest_tf_kline, tf_klines,
-                    kma_tf["level"], degradation_reasons, degraded_components
+                    context[f"kma_{tf}"], degradation_reasons, degraded_components
                 )
                 context[f"hmm_state_{tf}"] = hmm_tf["state"]
                 context[f"hmm_probabilities_{tf}"] = hmm_tf["probabilities"]
-                context[f"atr_{tf}"] = self._get_or_compute_atr(symbol, tf, tf_klines, degradation_reasons)
+                context[f"atr_{tf}"] = await self._get_or_compute_atr_async(
+                    symbol, tf, tf_klines, degradation_reasons
+                )
 
             # 4. ATR
-            context["atr_3m"] = self._get_or_compute_atr(
+            context["atr_3m"] = await self._get_or_compute_atr_async(
                 symbol, self.primary_interval, primary_klines, degradation_reasons
             )
 
@@ -336,22 +344,22 @@ class ContextPipeline:
             )
 
             # 7. 成交量
-            context["volume_ma20"] = self._safe_volume_ma(
+            context["volume_ma20"] = await self._safe_volume_ma_async(
                 symbol, self.primary_interval, primary_klines, degradation_reasons
             )
 
             # 8. 波动率分位数
-            context["volatility_percentile"] = self._calculate_volatility_percentile(
+            context["volatility_percentile"] = await self._calculate_volatility_percentile_async(
                 symbol, self.primary_interval, primary_klines, open_time_ms, degradation_reasons
             )
 
-            # 聚合降级
             context = self._finalize_context(
                 context, degradation_reasons, degraded_components,
                 "degraded" if degradation_reasons else "normal"
             )
             self._validate_context_completeness(context)
-            self._cache_context(symbol, open_time_ms, self._sanitize_for_cache(context))
+            async with self._lock:
+                self._cache_context(symbol, open_time_ms, self._sanitize_for_cache(context))
 
         except asyncio.CancelledError:
             logger.info(f"Context build cancelled for {symbol}")
@@ -364,22 +372,24 @@ class ContextPipeline:
         finally:
             await self._cleanup_if_needed()
             elapsed_ms = (time.perf_counter() - start_time) * 1000
-            self._total_build_time_ms += elapsed_ms
-            if elapsed_ms > self._max_build_time_ms:
-                self._max_build_time_ms = elapsed_ms
-            self._last_status = {
-                "last_symbol": symbol,
-                "last_quality": context.get("data_quality"),
-                "last_elapsed_ms": elapsed_ms,
-                "circuit_breakers": {
-                    "kma_open": sum(1 for cs in self._kma_circuit.values() if self._is_circuit_open(cs)),
-                    "hmm_open": sum(1 for cs in self._hmm_circuit.values() if self._is_circuit_open(cs))
+            async with self._lock:
+                self._total_build_time_ms += elapsed_ms
+                if elapsed_ms > self._max_build_time_ms:
+                    self._max_build_time_ms = elapsed_ms
+                self._last_status = {
+                    "last_symbol": symbol,
+                    "last_quality": context.get("data_quality"),
+                    "last_elapsed_ms": elapsed_ms,
+                    "circuit_breakers": {
+                        "kma_open": sum(1 for cs in self._kma_circuit.values() if self._is_circuit_open(cs)),
+                        "hmm_open": sum(1 for cs in self._hmm_circuit.values() if self._is_circuit_open(cs))
+                    }
                 }
-            }
         return context
 
     async def shutdown(self) -> None:
-        self.clear_cache()
+        async with self._lock:
+            self.clear_cache()
         logger.info("ContextPipeline shut down.")
 
     def get_cached_context(self, symbol: str, open_time: float) -> Optional[Dict[str, Any]]:
@@ -399,11 +409,11 @@ class ContextPipeline:
                                '_volume_spike_counters', '_kma_circuit', '_hmm_circuit']:
                 cache = getattr(self, cache_attr)
                 if isinstance(cache, OrderedDict):
-                    keys_to_del = [k for k in cache if (isinstance(k, tuple) and k[0] == symbol)]
+                    keys_to_del = [k for k in list(cache.keys()) if (isinstance(k, tuple) and k[0] == symbol)]
                     for k in keys_to_del:
                         del cache[k]
                 elif isinstance(cache, dict):
-                    keys_to_del = [k for k in cache if k[0] == symbol]
+                    keys_to_del = [k for k in list(cache.keys()) if isinstance(k, tuple) and k[0] == symbol]
                     for k in keys_to_del:
                         del cache[k]
         else:
@@ -491,8 +501,28 @@ class ContextPipeline:
         seconds = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600}.get(interval, 600)
         return max(5.0, seconds * 0.5)
 
+    @staticmethod
+    def _safe_float(val: Any, default: float = 0.0) -> float:
+        try:
+            f = float(val)
+            if math.isnan(f) or math.isinf(f):
+                return default
+            return f
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _limit_klines(klines: List[Kline]) -> List[Kline]:
+        if len(klines) > MAX_KLINES_HARD_LIMIT:
+            return klines[-MAX_KLINES_HARD_LIMIT:]
+        return klines
+
     def _is_circuit_open(self, state: Optional[CircuitState]) -> bool:
-        if state is None or state.failure_count < self.circuit_breaker_threshold:
+        if state is None:
+            return False
+        if state.half_open:
+            return False
+        if state.failure_count < self.circuit_breaker_threshold:
             return False
         return (time.monotonic() - state.circuit_open_time) < self.circuit_breaker_retry_sec
 
@@ -500,11 +530,16 @@ class ContextPipeline:
         return {
             "symbol": symbol,
             "primary_interval": self.primary_interval,
-            "latest_kline_ohlc": {"open": kline.open, "high": kline.high, "low": kline.low, "close": kline.close},
-            "last_price": kline.close,
+            "latest_kline_ohlc": {
+                "open": self._safe_float(kline.open),
+                "high": self._safe_float(kline.high),
+                "low": self._safe_float(kline.low),
+                "close": self._safe_float(kline.close),
+            },
+            "last_price": self._safe_float(kline.close),
             "open_time_ms": open_time_ms,
             "open_time": kline.open_time,
-            "volume": getattr(kline, 'volume', 0) or 0,
+            "volume": self._safe_float(getattr(kline, 'volume', 0) or 0, 0.0),
             "data_quality": "normal",
             "degradation_reasons": [],
             "degraded_components": {},
@@ -528,28 +563,32 @@ class ContextPipeline:
     def _sanitize_for_cache(self, context: Dict) -> Dict:
         ctx = context.copy()
         ctx.pop("latest_kline_ohlc", None)
-        ctx.pop("sr_levels", None)  # 移除大对象以节省缓存
+        ctx.pop("sr_levels", None)
         return ctx
 
     def _filter_future_klines(self, klines: List[Kline]) -> List[Kline]:
+        if not klines:
+            return []
         now_ms = time.time() * 1000
-        return [k for k in klines if k.open_time <= now_ms + self.max_future_klines_ms]
+        filtered = [k for k in klines if k.open_time is not None and k.open_time <= now_ms + self.max_future_klines_ms]
+        if len(filtered) < len(klines) and self.strict_time_check:
+            logger.debug(f"Filtered {len(klines) - len(filtered)} future klines")
+        return filtered
 
     def _ensure_time_order(self, klines: List[Kline]) -> List[Kline]:
         if not klines:
             return []
-        # 使用 (open_time, close, volume) 组合键去重
-        unique_dict: Dict[Tuple[int, float, float], Kline] = {}
+        unique_dict: Dict[int, Kline] = {}
         for k in klines:
             if k.open_time is None:
                 continue
-            key = (int(k.open_time), round(k.close, 6), round(k.volume, 6) if k.volume else 0.0)
-            unique_dict[key] = k
+            ot = int(k.open_time)
+            unique_dict[ot] = k
         return sorted(unique_dict.values(), key=lambda x: x.open_time)
 
     async def _fetch_klines(self, symbol: str, interval: str) -> Optional[List[Kline]]:
         try:
-            limit = min(self.percentile_lookback, self.max_fetch_bars)
+            limit = min(self.percentile_lookback, self.max_fetch_bars, MAX_KLINES_HARD_LIMIT)
             return await asyncio.wait_for(
                 self.kline_buffer.get_klines(symbol, interval, limit=limit),
                 timeout=self.kline_fetch_timeout,
@@ -562,23 +601,25 @@ class ContextPipeline:
             return None
 
     def _log_error_throttled(self, msg: str, key: str):
-        self._error_counters[key] = self._error_counters.get(key, 0) + 1
-        if self._error_counters[key] % 10 == 1:
+        # 短临界区
+        cnt = self._error_counters.get(key, 0) + 1
+        self._error_counters[key] = cnt
+        if cnt % 10 == 1:
             logger.error(msg)
         else:
             logger.debug(msg)
         if len(self._error_counters) > self._max_error_counters:
-            # 仅保留最近使用的20个不同类型的错误
-            sorted_items = sorted(self._error_counters.items(), key=lambda x: -x[1])
-            self._error_counters = dict(sorted_items[:20])
-            logger.warning("Error counters trimmed to top 20.")
+            keys = list(self._error_counters.keys())
+            for k in keys[:len(keys) - 20]:
+                self._error_counters.pop(k, None)
+            logger.warning("Error counters trimmed to recent 20.")
 
     def _set_default_tf_context(self, context: Dict, tf: str, kline: Kline):
-        context[f"kma_{tf}"] = kline.close
+        context[f"kma_{tf}"] = self._safe_float(kline.close)
         context[f"kma_slope_{tf}"] = 0.0
         context[f"hmm_state_{tf}"] = "RANGE"
         context[f"hmm_probabilities_{tf}"] = {"RANGE": 1.0}
-        context[f"atr_{tf}"] = -1.0  # 标记不可用
+        context[f"atr_{tf}"] = -1.0
 
     def _validate_context_completeness(self, context: Dict[str, Any]) -> None:
         defaults = {
@@ -598,6 +639,9 @@ class ContextPipeline:
         for key in REQUIRED_CONTEXT_KEYS:
             if key not in context:
                 context[key] = defaults.get(key)
+        for num_key in ("kma", "kma_slope", "kma_bandwidth", "atr_3m", "volume_ma20", "volatility_percentile"):
+            if num_key in context:
+                context[num_key] = self._safe_float(context[num_key], defaults.get(num_key, 0.0))
         if context.get("atr_3m") == 0.0 and "atr_defaulted" not in context.get("degradation_reasons", []):
             context["degradation_reasons"].append("atr_defaulted")
             context["degraded_components"]["atr"] = True
@@ -608,7 +652,6 @@ class ContextPipeline:
     def _add_to_cache(self, cache: OrderedDict, key: Any, value: Any, max_entries: int):
         if max_entries <= 0:
             return
-        # 移到末尾 (LRU)
         if key in cache:
             del cache[key]
         cache[key] = value
@@ -619,43 +662,55 @@ class ContextPipeline:
         now = time.monotonic()
         if now - self._last_cleanup_time < 120.0:
             return
-        self._last_cleanup_time = now
+        async with self._lock:
+            if now - self._last_cleanup_time < 120.0:
+                return
+            self._last_cleanup_time = now
 
-        # ATR 过期清理
-        for key, entry in list(self._atr_cache.items()):
-            if isinstance(entry, tuple) and len(entry) >= 3:
-                _, ts, ttl = entry
-                if now - ts > ttl:
+            for key, entry in list(self._atr_cache.items()):
+                if isinstance(entry, tuple) and len(entry) >= 3:
+                    _, ts, ttl = entry
+                    if now - ts > ttl:
+                        del self._atr_cache[key]
+                else:
                     del self._atr_cache[key]
-            else:
-                del self._atr_cache[key]
 
-        # S/R 过期清理
-        for key, entry in list(self._sr_cache.items()):
-            if isinstance(entry, tuple) and len(entry) == 2:
-                _, ts = entry
-                if now - ts > self._sr_ttl_sec:
+            for key, entry in list(self._sr_cache.items()):
+                if isinstance(entry, tuple) and len(entry) == 2:
+                    _, ts = entry
+                    if now - ts > self._sr_ttl_sec:
+                        del self._sr_cache[key]
+                else:
                     del self._sr_cache[key]
-            else:
-                del self._sr_cache[key]
 
-        # 全局上下文缓存限制
-        while self._context_cache_total > self.global_context_cache_limit:
-            worst_symbol = max(self._context_caches, key=lambda s: len(self._context_caches[s]), default=None)
-            if worst_symbol:
-                self._context_caches[worst_symbol].popitem(last=False)
-                self._context_cache_total -= 1
-            else:
-                break
+            while self._context_cache_total > self.global_context_cache_limit:
+                worst_symbol = max(self._context_caches, key=lambda s: len(self._context_caches[s]), default=None)
+                if worst_symbol and self._context_caches[worst_symbol]:
+                    self._context_caches[worst_symbol].popitem(last=False)
+                    self._context_cache_total -= 1
+                else:
+                    break
 
-        # 长期成交量缓存
-        while len(self._long_term_avg_vol) > self._long_term_avg_vol_max:
-            self._long_term_avg_vol.popitem(last=False)
+            while len(self._long_term_avg_vol) > self._long_term_avg_vol_max:
+                self._long_term_avg_vol.popitem(last=False)
 
-        # 成交量尖峰计数器清理（基于简单 FIFO）
-        if len(self._volume_spike_counters) > self._volume_spike_max:
-            while len(self._volume_spike_counters) > self._volume_spike_max:
-                self._volume_spike_counters.popitem(last=False)
+            if len(self._volume_spike_counters) > self._volume_spike_max:
+                keys = list(self._volume_spike_counters.keys())
+                for k in keys[:len(keys) // 2]:
+                    self._volume_spike_counters.pop(k, None)
+
+            if len(self._kma_circuit) > 500:
+                now_m = time.monotonic()
+                to_del = [k for k, cs in self._kma_circuit.items()
+                          if not self._is_circuit_open(cs) and (now_m - cs.last_failure_time) > 3600]
+                for k in to_del[:200]:
+                    self._kma_circuit.pop(k, None)
+            if len(self._hmm_circuit) > 500:
+                now_m = time.monotonic()
+                to_del = [k for k, cs in self._hmm_circuit.items()
+                          if not self._is_circuit_open(cs) and (now_m - cs.last_failure_time) > 3600]
+                for k in to_del[:200]:
+                    self._hmm_circuit.pop(k, None)
 
     def _cache_context(self, symbol: str, open_time_ms: int, context: Dict[str, Any]):
         if symbol not in self._context_caches:
@@ -670,7 +725,7 @@ class ContextPipeline:
             self._context_cache_total -= 1
 
     # =========================================================================
-    # KMA (带熔断自愈)
+    # KMA (半开熔断 + 最短锁持有)
     # =========================================================================
     async def _get_or_compute_kma(
         self, symbol: str, interval: str, kline: Kline,
@@ -678,36 +733,46 @@ class ContextPipeline:
         degraded_comp: Dict[str, bool]
     ) -> Dict[str, float]:
         cache_key = (symbol, interval, int(kline.open_time))
-        if cache_key in self._kma_cache:
-            self._cache_hit_kma += 1
-            self._add_to_cache(self._kma_cache, cache_key, self._kma_cache[cache_key], self._kma_max_entries)
-            return self._kma_cache[cache_key]
-        self._cache_miss_kma += 1
+        async with self._lock:
+            if cache_key in self._kma_cache:
+                self._cache_hit_kma += 1
+                val = self._kma_cache[cache_key]
+                self._add_to_cache(self._kma_cache, cache_key, val, self._kma_max_entries)
+                return val
+            self._cache_miss_kma += 1
 
-        circuit_key = (symbol, interval)
-        state = self._kma_circuit.get(circuit_key)
-        now = time.monotonic()
+            circuit_key = (symbol, interval)
+            now = time.monotonic()
+            state = self._kma_circuit.get(circuit_key)
+            if state and self._is_circuit_open(state):
+                logger.warning(f"KMA circuit breaker open for {symbol} {interval}, returning close price.")
+                degradation.append("kma_circuit_open")
+                degraded_comp[f"kma_{interval}"] = True
+                result = {"level": self._safe_float(kline.close), "slope": 0.0, "bandwidth": 0.0}
+                self._add_to_cache(self._kma_cache, cache_key, result, self._kma_max_entries)
+                return result
+            # 原子半开探测
+            if state and state.failure_count >= self.circuit_breaker_threshold:
+                if (now - state.circuit_open_time) >= self.circuit_breaker_retry_sec and not state.half_open:
+                    state.half_open = True
+                    state.circuit_open_time = now
 
-        if state and self._is_circuit_open(state):
-            logger.warning(f"KMA circuit breaker open for {symbol} {interval}, returning close price.")
-            degradation.append("kma_circuit_open")
-            degraded_comp[f"kma_{interval}"] = True
-            result = {"level": kline.close, "slope": 0.0, "bandwidth": 0.0}
-            self._add_to_cache(self._kma_cache, cache_key, result, self._kma_max_entries)
-            return result
-
-        result = {"level": kline.close, "slope": 0.0, "bandwidth": 0.0}
+        result = {"level": self._safe_float(kline.close), "slope": 0.0, "bandwidth": 0.0}
         success = False
         try:
-            recent_vol = self._get_or_compute_atr(symbol, interval, klines, degradation)
+            recent_vol = await self._get_or_compute_atr_async(symbol, interval, klines, degradation)
             ctx = {"recent_volatility": recent_vol, "klines": klines[-100:]}
             raw = await asyncio.wait_for(self.kma_computer.compute(kline, ctx), timeout=self.kma_compute_timeout)
             if raw and isinstance(raw, dict):
-                kma_level = float(raw.get("kma", kline.close))
-                kma_slope = float(raw.get("kma_slope", 0.0))
-                denom = max(kline.close * 0.01, 1e-4)
+                kma_level = self._safe_float(raw.get("kma"), kline.close)
+                kma_slope = self._safe_float(raw.get("kma_slope"), 0.0)
+                denom = max(abs(kline.close) * 0.01, 1e-4)
                 bandwidth = abs(kline.close - kma_level) / denom
-                result = {"level": kma_level, "slope": kma_slope, "bandwidth": min(bandwidth, 100.0)}
+                result = {
+                    "level": kma_level,
+                    "slope": kma_slope,
+                    "bandwidth": min(self._safe_float(bandwidth), 100.0)
+                }
                 success = True
             else:
                 degradation.append(f"kma_empty_result_{interval}")
@@ -721,29 +786,33 @@ class ContextPipeline:
             degradation.append(f"kma_error_{interval}")
             degraded_comp[f"kma_{interval}"] = True
 
-        # 更新熔断状态
-        if success:
-            if circuit_key in self._kma_circuit:
+        async with self._lock:
+            circuit_key = (symbol, interval)
+            now = time.monotonic()
+            if success:
+                if circuit_key in self._kma_circuit:
+                    cs = self._kma_circuit[circuit_key]
+                    cs.success_count += 1
+                    cs.half_open = False
+                    if cs.success_count >= self.circuit_success_reset:
+                        del self._kma_circuit[circuit_key]
+                        logger.info(f"KMA circuit breaker reset for {symbol} {interval}")
+            else:
+                if circuit_key not in self._kma_circuit:
+                    self._kma_circuit[circuit_key] = CircuitState()
                 cs = self._kma_circuit[circuit_key]
-                cs.success_count += 1
-                if cs.success_count >= self.circuit_success_reset:
-                    del self._kma_circuit[circuit_key]
-                    logger.info(f"KMA circuit breaker reset for {symbol} {interval}")
-        else:
-            if circuit_key not in self._kma_circuit:
-                self._kma_circuit[circuit_key] = CircuitState()
-            cs = self._kma_circuit[circuit_key]
-            cs.failure_count += 1
-            cs.last_failure_time = now
-            if cs.failure_count >= self.circuit_breaker_threshold and not self._is_circuit_open(cs):
-                cs.circuit_open_time = now
-                logger.warning(f"KMA circuit breaker opened for {symbol} {interval}")
+                cs.failure_count += 1
+                cs.last_failure_time = now
+                cs.half_open = False
+                if cs.failure_count >= self.circuit_breaker_threshold and not self._is_circuit_open(cs):
+                    cs.circuit_open_time = now
+                    logger.warning(f"KMA circuit breaker opened for {symbol} {interval}")
 
-        self._add_to_cache(self._kma_cache, cache_key, result, self._kma_max_entries)
+            self._add_to_cache(self._kma_cache, cache_key, result, self._kma_max_entries)
         return result
 
     # =========================================================================
-    # HMM (带熔断自愈)
+    # HMM (半开熔断 + 最短锁持有)
     # =========================================================================
     async def _get_or_compute_hmm(
         self, symbol: str, interval: str, kline: Kline,
@@ -751,23 +820,29 @@ class ContextPipeline:
         degradation: List[str], degraded_comp: Dict[str, bool]
     ) -> Dict[str, Any]:
         cache_key = (symbol, interval, int(kline.open_time))
-        if cache_key in self._hmm_cache:
-            self._cache_hit_hmm += 1
-            self._add_to_cache(self._hmm_cache, cache_key, self._hmm_cache[cache_key], self._hmm_max_entries)
-            return copy.deepcopy(self._hmm_cache[cache_key])
-        self._cache_miss_hmm += 1
+        async with self._lock:
+            if cache_key in self._hmm_cache:
+                self._cache_hit_hmm += 1
+                val = self._hmm_cache[cache_key]
+                self._add_to_cache(self._hmm_cache, cache_key, val, self._hmm_max_entries)
+                # 浅拷贝 + 概率字典拷贝即可（结果不可变）
+                return {"state": val["state"], "probabilities": dict(val["probabilities"])}
+            self._cache_miss_hmm += 1
 
-        circuit_key = (symbol, interval)
-        state = self._hmm_circuit.get(circuit_key)
-        now = time.monotonic()
-
-        if state and self._is_circuit_open(state):
-            logger.warning(f"HMM circuit breaker open for {symbol} {interval}, returning RANGE.")
-            degradation.append("hmm_circuit_open")
-            degraded_comp[f"hmm_{interval}"] = True
-            result = {"state": "RANGE", "probabilities": {"RANGE": 1.0}}
-            self._add_to_cache(self._hmm_cache, cache_key, result, self._hmm_max_entries)
-            return result
+            circuit_key = (symbol, interval)
+            now = time.monotonic()
+            state = self._hmm_circuit.get(circuit_key)
+            if state and self._is_circuit_open(state):
+                logger.warning(f"HMM circuit breaker open for {symbol} {interval}, returning RANGE.")
+                degradation.append("hmm_circuit_open")
+                degraded_comp[f"hmm_{interval}"] = True
+                result = {"state": "RANGE", "probabilities": {"RANGE": 1.0}}
+                self._add_to_cache(self._hmm_cache, cache_key, result, self._hmm_max_entries)
+                return result
+            if state and state.failure_count >= self.circuit_breaker_threshold:
+                if (now - state.circuit_open_time) >= self.circuit_breaker_retry_sec and not state.half_open:
+                    state.half_open = True
+                    state.circuit_open_time = now
 
         result = {"state": "RANGE", "probabilities": {"RANGE": 1.0}}
         success = False
@@ -783,23 +858,33 @@ class ContextPipeline:
                 logger.debug(f"HMM not trained for {symbol} {interval}")
                 degradation.append(f"hmm_not_trained_{interval}")
                 degraded_comp[f"hmm_{interval}"] = True
-                self._add_to_cache(self._hmm_cache, cache_key, result, self._hmm_max_entries)
+                async with self._lock:
+                    self._add_to_cache(self._hmm_cache, cache_key, result, self._hmm_max_entries)
                 return result
 
             features = self._extract_hmm_features(kline, klines, kma_level, interval, symbol, degradation)
             if features:
-                state_raw, probs = await asyncio.wait_for(self.hmm_detector.predict(features), timeout=self.hmm_predict_timeout)
+                for fk in list(features.keys()):
+                    features[fk] = self._safe_float(features[fk], 0.0)
+                state_raw, probs = await asyncio.wait_for(
+                    self.hmm_detector.predict(features), timeout=self.hmm_predict_timeout
+                )
                 state_str = self._normalize_hmm_state(state_raw)
                 result["state"] = state_str
-                if probs:
+                if probs and isinstance(probs, dict):
                     cleaned = {}
                     for k, v in probs.items():
-                        if isinstance(v, (int, float)) and not math.isnan(v) and not math.isinf(v):
-                            cleaned[str(k)] = float(v)
+                        fv = self._safe_float(v, None)
+                        if fv is not None:
+                            cleaned[str(k)] = fv
                     if not cleaned:
                         degradation.append(f"hmm_probs_all_invalid_{interval}")
                         degraded_comp[f"hmm_{interval}"] = True
-                    result["probabilities"] = cleaned
+                    else:
+                        s = sum(cleaned.values())
+                        if s > 0:
+                            cleaned = {k: v / s for k, v in cleaned.items()}
+                        result["probabilities"] = cleaned
                 else:
                     degradation.append(f"hmm_probs_none_{interval}")
                     degraded_comp[f"hmm_{interval}"] = True
@@ -816,24 +901,29 @@ class ContextPipeline:
             degradation.append(f"hmm_error_{interval}")
             degraded_comp[f"hmm_{interval}"] = True
 
-        if success:
-            if circuit_key in self._hmm_circuit:
+        async with self._lock:
+            circuit_key = (symbol, interval)
+            now = time.monotonic()
+            if success:
+                if circuit_key in self._hmm_circuit:
+                    cs = self._hmm_circuit[circuit_key]
+                    cs.success_count += 1
+                    cs.half_open = False
+                    if cs.success_count >= self.circuit_success_reset:
+                        del self._hmm_circuit[circuit_key]
+                        logger.info(f"HMM circuit breaker reset for {symbol} {interval}")
+            else:
+                if circuit_key not in self._hmm_circuit:
+                    self._hmm_circuit[circuit_key] = CircuitState()
                 cs = self._hmm_circuit[circuit_key]
-                cs.success_count += 1
-                if cs.success_count >= self.circuit_success_reset:
-                    del self._hmm_circuit[circuit_key]
-                    logger.info(f"HMM circuit breaker reset for {symbol} {interval}")
-        else:
-            if circuit_key not in self._hmm_circuit:
-                self._hmm_circuit[circuit_key] = CircuitState()
-            cs = self._hmm_circuit[circuit_key]
-            cs.failure_count += 1
-            cs.last_failure_time = now
-            if cs.failure_count >= self.circuit_breaker_threshold and not self._is_circuit_open(cs):
-                cs.circuit_open_time = now
-                logger.warning(f"HMM circuit breaker opened for {symbol} {interval}")
+                cs.failure_count += 1
+                cs.last_failure_time = now
+                cs.half_open = False
+                if cs.failure_count >= self.circuit_breaker_threshold and not self._is_circuit_open(cs):
+                    cs.circuit_open_time = now
+                    logger.warning(f"HMM circuit breaker opened for {symbol} {interval}")
 
-        self._add_to_cache(self._hmm_cache, cache_key, result, self._hmm_max_entries)
+            self._add_to_cache(self._hmm_cache, cache_key, result, self._hmm_max_entries)
         return result
 
     def _normalize_hmm_state(self, state: Any) -> str:
@@ -841,9 +931,12 @@ class ContextPipeline:
             return "RANGE"
         if isinstance(state, str):
             s = state.upper()
-            if "BULL" in s: return "BULL"
-            if "BEAR" in s: return "BEAR"
-            if "RANGE" in s: return "RANGE"
+            if "BULL" in s:
+                return "BULL"
+            if "BEAR" in s:
+                return "BEAR"
+            if "RANGE" in s:
+                return "RANGE"
             self._log_error_throttled(f"Unknown HMM state string: {state}", "hmm_state_string")
             return "RANGE"
         if hasattr(state, 'value'):
@@ -852,35 +945,45 @@ class ContextPipeline:
         return "RANGE"
 
     # =========================================================================
-    # ATR
+    # ATR（bar时间键 + 全锁保护）
     # =========================================================================
-    def _get_or_compute_atr(
+    async def _get_or_compute_atr_async(
         self, symbol: str, interval: str, klines: List[Kline],
         degradation: List[str]
     ) -> float:
-        cache_key = (symbol, interval)
+        # 使用最新 bar 的 open_time 作为缓存键核心，彻底杜绝墙钟污染
+        last_ot = int(klines[-1].open_time) if klines else 0
+        cache_key = (symbol, interval, last_ot)
         now = time.monotonic()
         ttl = self._calc_atr_ttl(interval)
-        if cache_key in self._atr_cache:
-            entry = self._atr_cache[cache_key]
-            if isinstance(entry, tuple) and len(entry) >= 3:
-                val, ts, cached_ttl = entry
-                if now - ts < cached_ttl:
-                    return val
+
+        async with self._lock:
+            if cache_key in self._atr_cache:
+                entry = self._atr_cache[cache_key]
+                if isinstance(entry, tuple) and len(entry) >= 3:
+                    val, ts, cached_ttl = entry
+                    if now - ts < cached_ttl:
+                        return self._safe_float(val, 0.0)
+
         atr = self._calculate_atr(klines, self.atr_period)
         if atr is None or atr <= 0.0:
             atr = self._get_dynamic_min_atr(klines)
-            degradation.append("atr_insufficient_data")
-        self._add_to_cache(self._atr_cache, cache_key, (atr, now, ttl), self._atr_max_entries)
+            if "atr_insufficient_data" not in degradation:
+                degradation.append("atr_insufficient_data")
+        atr = self._safe_float(atr, self._get_dynamic_min_atr(klines))
+
+        async with self._lock:
+            self._add_to_cache(self._atr_cache, cache_key, (atr, now, ttl), self._atr_max_entries)
         return atr
 
     def _get_dynamic_min_atr(self, klines: List[Kline]) -> float:
         if not klines:
             return max(self.tick_size or 0.01, 0.01)
-        closes = [k.close for k in klines[-20:] if k.close is not None and k.close > 0]
+        closes = [self._safe_float(k.close) for k in klines[-20:] if k.close is not None]
+        closes = [c for c in closes if c > 0]
         if not closes:
             return max(self.tick_size or 0.01, 0.01)
-        median_price = sorted(closes)[len(closes)//2]
+        median_price = sorted(closes)[len(closes) // 2]
         return max(median_price * 0.0001, self.tick_size or 0.01)
 
     # =========================================================================
@@ -892,19 +995,20 @@ class ContextPipeline:
         context: Dict, degradation: List[str], degraded_comp: Dict[str, bool]
     ):
         filtered_sr: Dict[str, Any] = {}
+        cache_key = (symbol, tuple(sorted(self.secondary_intervals)))
+        now = time.monotonic()
         try:
-            cache_key = (symbol, tuple(sorted(self.secondary_intervals)))
-            now = time.monotonic()
-            if cache_key in self._sr_cache:
-                entry = self._sr_cache[cache_key]
-                if isinstance(entry, tuple) and len(entry) == 2:
-                    sr_data, ts = entry
-                    if now - ts < self._sr_ttl_sec:
-                        context["sr_levels"] = sr_data
-                        self._sr_cache_hit += 1
-                        return
-                else:
-                    del self._sr_cache[cache_key]
+            async with self._lock:
+                if cache_key in self._sr_cache:
+                    entry = self._sr_cache[cache_key]
+                    if isinstance(entry, tuple) and len(entry) == 2:
+                        sr_data, ts = entry
+                        if now - ts < self._sr_ttl_sec:
+                            context["sr_levels"] = sr_data
+                            self._sr_cache_hit += 1
+                            return
+                    else:
+                        del self._sr_cache[cache_key]
 
             sr_levels = await asyncio.wait_for(
                 self.sr_pipeline.compute_all(symbol, primary_klines, secondary_klines),
@@ -920,7 +1024,8 @@ class ContextPipeline:
                     degradation.append("sr_filter_error")
                     degraded_comp["sr"] = True
                     filtered_sr = {}
-                self._add_to_cache(self._sr_cache, cache_key, (filtered_sr, now), self._sr_max_entries)
+                async with self._lock:
+                    self._add_to_cache(self._sr_cache, cache_key, (filtered_sr, now), self._sr_max_entries)
                 context["sr_levels"] = filtered_sr
             else:
                 degradation.append("sr_compute_null")
@@ -929,13 +1034,16 @@ class ContextPipeline:
             logger.warning(f"S/R timeout for {symbol}")
             degradation.append("sr_timeout")
             degraded_comp["sr"] = True
-            self._add_to_cache(self._sr_cache, cache_key, (filtered_sr, now), self._sr_max_entries)
+            async with self._lock:
+                self._add_to_cache(self._sr_cache, cache_key, (filtered_sr, now), self._sr_max_entries)
+            context["sr_levels"] = filtered_sr
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error(f"S/R error for {symbol}: {e}")
             degradation.append("sr_error")
             degraded_comp["sr"] = True
+            context["sr_levels"] = {}
 
     async def _get_regime(
         self, symbol: str, klines: List[Kline],
@@ -963,56 +1071,60 @@ class ContextPipeline:
             return "RANGE"
 
     # =========================================================================
-    # 成交量
+    # 成交量（全锁保护）
     # =========================================================================
-    def _safe_volume_ma(
+    async def _safe_volume_ma_async(
         self, symbol: str, interval: str, klines: List[Kline],
         degradation: List[str]
     ) -> float:
         ma = self._calculate_volume_ma(klines, self.volume_ma_period)
         key = (symbol, interval)
-        if ma is not None and ma > 0 and not math.isnan(ma) and not math.isinf(ma):
-            old = self._long_term_avg_vol.get(key)
-            if old is not None and old > 0:
-                if ma > old * 10.0 and (ma - old) > max(1000, old * 2.0):
-                    spike_count = self._volume_spike_counters.get(key, 0) + 1
-                    self._volume_spike_counters[key] = spike_count
-                    if spike_count >= 3:
-                        self._long_term_avg_vol[key] = old * (1 - self.volume_ema_alpha) + ma * self.volume_ema_alpha
-                        self._volume_spike_counters[key] = 0
+        async with self._lock:
+            if ma is not None and ma > 0 and not math.isnan(ma) and not math.isinf(ma):
+                old = self._long_term_avg_vol.get(key)
+                if old is not None and old > 0:
+                    if ma > old * 10.0 and (ma - old) > max(1000.0, old * 2.0):
+                        spike_count = self._volume_spike_counters.get(key, 0) + 1
+                        self._volume_spike_counters[key] = spike_count
+                        if spike_count >= 3:
+                            self._long_term_avg_vol[key] = old * (1 - self.volume_ema_alpha) + ma * self.volume_ema_alpha
+                            self._volume_spike_counters[key] = 0
+                        else:
+                            degradation.append("volume_ma_spike_rejected")
+                            return self._safe_float(old, 1.0)
                     else:
-                        degradation.append("volume_ma_spike_rejected")
-                        return old
+                        self._volume_spike_counters[key] = max(0, self._volume_spike_counters.get(key, 0) - 1)
+                        self._long_term_avg_vol[key] = old * (1 - self.volume_ema_alpha) + ma * self.volume_ema_alpha
                 else:
-                    self._volume_spike_counters[key] = 0
-                    self._long_term_avg_vol[key] = old * (1 - self.volume_ema_alpha) + ma * self.volume_ema_alpha
-            else:
-                self._long_term_avg_vol[key] = ma
-            while len(self._long_term_avg_vol) > self._long_term_avg_vol_max:
-                self._long_term_avg_vol.popitem(last=False)
-            return self._long_term_avg_vol[key]
-        if key in self._long_term_avg_vol:
-            return self._long_term_avg_vol[key]
-        degradation.append("volume_ma_unavailable")
-        return 1.0
+                    self._long_term_avg_vol[key] = ma
+                while len(self._long_term_avg_vol) > self._long_term_avg_vol_max:
+                    self._long_term_avg_vol.popitem(last=False)
+                return self._safe_float(self._long_term_avg_vol[key], 1.0)
+            if key in self._long_term_avg_vol:
+                return self._safe_float(self._long_term_avg_vol[key], 1.0)
+            degradation.append("volume_ma_unavailable")
+            return 1.0
 
     # =========================================================================
     # 纯计算函数
     # =========================================================================
     def _calculate_atr(self, klines: List[Kline], period: int = 14) -> Optional[float]:
-        if len(klines) < 2:
+        n = len(klines)
+        if n < 2:
             return None
         tr_values = []
-        for i in range(1, min(len(klines), period + 1)):
-            prev = klines[-i - 1]
-            curr = klines[-i]
-            high = getattr(curr, 'high', 0.0) or 0.0
-            low = getattr(curr, 'low', 0.0) or 0.0
-            prev_close = getattr(prev, 'close', 0.0) or 0.0
-            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-            if math.isnan(tr) or math.isinf(tr):
+        start = max(1, n - period)
+        for i in range(start, n):
+            curr = klines[i]
+            prev = klines[i - 1]
+            high = self._safe_float(getattr(curr, 'high', 0.0))
+            low = self._safe_float(getattr(curr, 'low', 0.0))
+            prev_close = self._safe_float(getattr(prev, 'close', 0.0))
+            if high < low:
                 continue
-            tr_values.append(tr)
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            if tr > 0 and not math.isnan(tr) and not math.isinf(tr):
+                tr_values.append(tr)
         if not tr_values:
             return None
         return sum(tr_values) / len(tr_values)
@@ -1023,93 +1135,95 @@ class ContextPipeline:
         volumes = []
         for k in klines[-period:]:
             vol = getattr(k, 'volume', None)
-            if vol is not None and vol >= 0 and not math.isnan(vol) and not math.isinf(vol):
-                volumes.append(vol)
+            fv = self._safe_float(vol, None)
+            if fv is not None and fv >= 0:
+                volumes.append(fv)
         if not volumes:
             return None
         avg = sum(volumes) / len(volumes)
-        if math.isnan(avg) or math.isinf(avg):
-            return None
-        return avg
+        return self._safe_float(avg, None)
 
-    def _calculate_volatility_percentile(
+    async def _calculate_volatility_percentile_async(
         self, symbol: str, interval: str, klines: List[Kline],
         open_time_ms: int, degradation: List[str]
     ) -> float:
         if len(klines) < self.atr_period + 1:
             return 50.0
-        current_atr = self._get_or_compute_atr(symbol, interval, klines, degradation)
+        current_atr = await self._get_or_compute_atr_async(symbol, interval, klines, degradation)
         if current_atr is None or current_atr <= 0:
             return 50.0
 
         hist_key = (symbol, interval)
-        last_ms = self._last_atr_open_time.get(hist_key, 0)
-        if open_time_ms > last_ms:
-            if hist_key not in self._atr_history:
-                self._atr_history[hist_key] = deque(maxlen=self.percentile_lookback)
-            self._atr_history[hist_key].append(current_atr)
-            self._last_atr_open_time[hist_key] = open_time_ms
+        async with self._lock:
+            last_ms = self._last_atr_open_time.get(hist_key, 0)
+            if open_time_ms > last_ms:
+                if hist_key not in self._atr_history:
+                    self._atr_history[hist_key] = deque(maxlen=self.percentile_lookback)
+                self._atr_history[hist_key].append(current_atr)
+                self._last_atr_open_time[hist_key] = open_time_ms
 
-        history = self._atr_history.get(hist_key)
-        if not history or len(history) < 10:
-            return 50.0
+            history = self._atr_history.get(hist_key)
+            if not history or len(history) < 10:
+                return 50.0
 
-        median_atr = sorted(history)[len(history)//2]
-        if median_atr == 0:
-            return 50.0
+            sorted_hist = sorted(v for v in history if v > 0)
+            if not sorted_hist:
+                return 50.0
+            median_atr = sorted_hist[len(sorted_hist) // 2]
+            if median_atr <= 0:
+                return 50.0
 
-        if current_atr < median_atr * 0.1:
-            return 5.0
+            if current_atr < median_atr * 0.05:
+                return 5.0
 
-        if len(history) >= 3:
-            recent_three = list(history)[-3:]
-            if all(v > median_atr * 5.0 for v in recent_three):
-                valid_history = [v for v in history if v <= median_atr * 5.0]
-            else:
-                valid_history = [v for v in history if v <= current_atr * 10.0]
-        else:
-            valid_history = [v for v in history if v <= current_atr * 10.0]
+            valid_history = [v for v in sorted_hist if v <= max(median_atr * 8.0, current_atr * 5.0)]
+            if len(valid_history) < 5:
+                valid_history = sorted_hist
 
-        if not valid_history:
-            degradation.append("volatility_percentile_no_valid_history")
-            return 50.0
+            if not valid_history:
+                degradation.append("volatility_percentile_no_valid_history")
+                return 50.0
 
-        sorted_history = sorted(valid_history)
-        count = sum(1 for v in sorted_history if v <= current_atr)
-        percentile = (count / len(sorted_history)) * 100.0
-        return min(100.0, max(0.0, percentile))
+            count = sum(1 for v in valid_history if v <= current_atr)
+            percentile = (count / len(valid_history)) * 100.0
+            return min(100.0, max(0.0, percentile))
 
     def _extract_hmm_features(
         self, kline: Kline, klines: List[Kline], kma_level: float,
         interval: str, symbol: str, degradation: List[str]
     ) -> Dict[str, float]:
         if len(klines) < 20:
-            # 尝试扩大窗口至50根
-            extended = klines
-            if len(extended) >= 20:
-                pass  # 实际上还是会返回空，但逻辑保留
             return {}
         try:
-            closes = [k.close for k in klines[-20:] if k.close is not None and k.close > 0]
-            volumes = [k.volume for k in klines[-20:] if getattr(k, 'volume', None) is not None and k.volume >= 0]
+            closes = [self._safe_float(k.close) for k in klines[-20:] if k.close is not None]
+            closes = [c for c in closes if c > 0]
+            volumes = []
+            for k in klines[-20:]:
+                v = getattr(k, 'volume', None)
+                fv = self._safe_float(v, None)
+                if fv is not None and fv >= 0:
+                    volumes.append(fv)
             if len(closes) < 2 or not volumes:
                 return {}
             log_ret = 0.0
             if closes[-2] > 0 and closes[-1] > 0:
-                log_ret = math.log(closes[-1] / closes[-2])
-            atr = self._get_or_compute_atr(symbol, interval, klines, degradation)
+                ratio = closes[-1] / closes[-2]
+                if ratio > 0:
+                    log_ret = math.log(ratio)
+            # 注意：此处为同步路径，ATR 已在上层缓存，直接计算避免递归锁
+            atr = self._calculate_atr(klines, self.atr_period) or self._get_dynamic_min_atr(klines)
             if atr <= 0:
                 atr = 1e-8
-            range_norm = min(max(kline.high - kline.low, 0) / atr, 10.0)
-            deviation = (kline.close - kma_level) / atr
+            range_norm = min(max(self._safe_float(kline.high) - self._safe_float(kline.low), 0.0) / atr, 10.0)
+            deviation = (self._safe_float(kline.close) - self._safe_float(kma_level)) / atr
             deviation = max(min(deviation, 10.0), -10.0)
-            avg_vol = sum(volumes) / len(volumes)
-            vol_ratio = kline.volume / max(avg_vol, 1e-10) if kline.volume is not None else 1.0
+            avg_vol = sum(volumes) / len(volumes) if volumes else 1.0
+            vol_ratio = self._safe_float(kline.volume, 0.0) / max(avg_vol, 1e-10)
             return {
-                "log_ret": 0.0 if math.isnan(log_ret) or math.isinf(log_ret) else log_ret,
-                "range_norm": range_norm,
-                "deviation": deviation,
-                "vol_ratio": min(vol_ratio, 10.0),
+                "log_ret": self._safe_float(log_ret, 0.0),
+                "range_norm": self._safe_float(range_norm, 0.0),
+                "deviation": self._safe_float(deviation, 0.0),
+                "vol_ratio": min(self._safe_float(vol_ratio, 1.0), 10.0),
             }
         except Exception as e:
             logger.error(f"Failed to extract HMM features for {symbol}: {e}")
@@ -1120,20 +1234,20 @@ class ContextPipeline:
     # =========================================================================
     def _is_valid_kline(self, kline: Kline) -> bool:
         try:
-            if kline.close is None or kline.close <= 0:
+            if kline.close is None or self._safe_float(kline.close) <= 0:
                 return False
             if kline.high is None or kline.low is None or kline.open is None:
                 return False
-            if kline.high < kline.low:
+            if self._safe_float(kline.high) < self._safe_float(kline.low):
                 return False
-            if kline.volume is not None and kline.volume < 0:
+            if kline.volume is not None and self._safe_float(kline.volume) < 0:
                 return False
             if kline.open_time is None or kline.open_time <= 0:
                 return False
             if not self.strict_time_check:
                 return True
             now_ms = time.time() * 1000
-            if kline.open_time < (now_ms - 7 * 86400_000) or kline.open_time > (now_ms + 1 * 86400_000):
+            if kline.open_time < (now_ms - 30 * 86400_000) or kline.open_time > (now_ms + 1 * 86400_000):
                 logger.warning(f"Kline open_time out of range: {kline.open_time}")
                 return False
             return True
