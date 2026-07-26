@@ -1,10 +1,20 @@
 {
-  "//": "KHAOS Node 环境 TypeScript 配置 v2.0 - 华尔街机构级标准。用于 Vite/Vitest 配置文件。",
+  "//1": "KHAOS Node 环境 TypeScript 配置 v3.0 - 华尔街机构级强化版",
+  "//2": "用于 Vite/Vitest 等构建工具配置文件。启用 composite 以支持项目引用。",
   "compilerOptions": {
+    /* ===== 项目引用与输出 ===== */
+    "composite": true,
+    "declaration": true,
+    "declarationMap": true,
+    "emitDeclarationOnly": true,
+    "outDir": "./node_modules/.cache/tsconfig-node-declarations",
+    "tsBuildInfoFile": "./node_modules/.cache/tsconfig-node.tsbuildinfo",
+    "noEmitOnError": true,
+
     /* ===== 目标与环境 ===== */
     "target": "ES2022",
-    "lib": ["ES2022"],
-    "module": "ESNext",
+    "lib": ["ES2023"],
+    "module": "ES2022",
     "moduleResolution": "bundler",
     "moduleDetection": "force",
     "types": ["node", "vite/client"],
@@ -27,17 +37,19 @@
     "noUncheckedIndexedAccess": true,
     "noPropertyAccessFromIndexSignature": true,
     "exactOptionalPropertyTypes": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
 
-    /* ===== 模块与输出 ===== */
+    /* ===== 模块与解析 ===== */
     "verbatimModuleSyntax": false,
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
     "isolatedModules": true,
-    "skipLibCheck": true,
+    "allowJs": false,
+    "skipLibCheck": false,
     "useDefineForClassFields": true,
-    "noEmit": true,
     "removeComments": false,
     "sourceMap": false,
 
@@ -45,8 +57,6 @@
     "rootDir": ".",
 
     /* ===== 诊断与格式 ===== */
-    "allowUnreachableCode": false,
-    "allowUnusedLabels": false,
     "noErrorTruncation": true,
     "newLine": "lf",
     "charset": "utf8",
@@ -56,7 +66,7 @@
 
     /* ===== 性能 ===== */
     "incremental": true,
-    "tsBuildInfoFile": ".tsbuildinfo/node.tsbuildinfo"
+    "maxNodeModuleJsDepth": 0
   },
   "include": ["vite.config.ts", "vitest.config.ts"],
   "exclude": ["node_modules", "dist", "build", "coverage"]
