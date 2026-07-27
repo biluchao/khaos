@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0e17">
+  <meta name="description" content="KHAOS 量化交易系统部署监控 - 实时显示各模块启动状态与错误诊断">
+  <meta name="robots" content="noindex, nofollow">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:;">
+  <title>KHAOS · 部署监控</title>
+  <style>
+    /* =============================================================================
+       KHAOS 部署监控界面样式 (机构级 v3.0 — 终极审计版)
+       满足 WCAG AA、4K、暗/亮主题、高对比度、减少动画、打印优化。
+       ============================================================================= */
+    :root {
+      --bg: #0a0e17;
+      --surface: #1a1f2e;
+      --surface-hover: #252b3a;
+      --text: #e0e0e0;
+      --text-secondary: #b0b5bf;
+      --gold: #e8c170;
+      --success: #2ebd85;
+      --warning: #f0b90b;
+      --error: #e84d5d;
+      --pending: #7a7f8a;
+      --radius: 8px;
+      --font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      --font-size-base: clamp(1rem, 2vw, 1.125rem);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-family);
+      font-size: var(--font-size-base);
+      line-height: 1.6;
+      padding: 32px;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    @media (min-width: 2560px) {
+      :root { --font-size-base: 1.25rem; }
+      body { padding: 48px; }
+    }
+
+    .container {
+      width: 100%;
+      max-width: 960px;
+    }
+
+    header {
+      margin-bottom: 32px;
+      border-bottom: 1px solid var(--surface);
+      padding-bottom: 16px;
+    }
+
+    h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      color: var(--gold);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .subtitle {
+      color: var(--text-secondary);
+      font-size: 0.95rem;
+      margin-top: 8px;
+    }
+
+    .overall-status {
+      background: var(--surface);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      margin-bottom: 24px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      font-weight: 600;
+      font-size: 1.1rem;
+    }
+
+    .overall-status.success { border-left: 4px solid var(--success); }
+    .overall-status.failed  { border-left: 4px solid var(--error); }
+    .overall-status.running { border-left: 4px solid var(--warning); }
+    .overall-status.pending { border-left: 4px solid var(--pending); }
+
+    .tasks {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      max-height: 70vh;
+      overflow-y: auto;
+      padding-right: 8px;
+      scroll-behavior: smooth;
+    }
+
+    .task-card {
+      background: var(--surface);
+      border-radius: var(--radius);
+      padding: 16px 20px;
+      display: flex;
+      align-items: flex-start;
+      gap: 16px;
+      transition: background 0.2s, box-shadow 0.2s;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+    }
+
+    .task-card:hover {
+      background: var(--surface-hover);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    }
+
+    .task-status-icon {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+
+    .pending  { background: var(--pending); }
+    .running  { background: var(--warning); animation: pulse 1.2s ease-in-out infinite; }
+    .success  { background: var(--success); }
+    .failed   { background: var(--error); }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(1.1); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .running { animation: none; }
+      * { scroll-behavior: auto; }
+    }
+
+    .task-content { flex: 1; min-width: 0; }
+
+    .task-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .task-name {
+      font-weight: 600;
+      color: var(--text);
+      word-break: break-word;
+    }
+
+    .task-description {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+    }
+
+    .task-time {
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+      white-space: nowrap;
+    }
+
+    .error-detail {
+      margin-top: 8px;
+      background: rgba(232, 77, 93, 0.1);
+      border-left: 3px solid var(--error);
+      padding: 10px 14px;
+      border-radius: 4px;
+      font-size: 0.9rem;
+      color: var(--error);
+      font-family: 'Courier New', monospace;
+      word-break: break-all;
+      white-space: pre-wrap;
+    }
+
+    .log-list {
+      margin-top: 8px;
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+      padding-left: 16px;
+      max-height: 120px;
+      overflow-y: auto;
+      border-left: 1px solid var(--surface);
+    }
+
+    .log-list li {
+      list-style-type: square;
+      margin-bottom: 4px;
+    }
+
+    .collapse-btn, .retry-btn, .cancel-btn, .export-btn, .jump-btn {
+      background: none;
+      border: 1px solid var(--text-secondary);
+      color: var(--text-secondary);
+      padding: 4px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.8rem;
+      font-weight: 600;
+      transition: background 0.2s;
+      margin-top: 8px;
+      margin-right: 8px;
+    }
+
+    .retry-btn, .jump-btn { background: var(--gold); color: var(--bg); border: none; }
+    .cancel-btn { background: var(--error); color: white; border: none; }
+    .export-btn { background: var(--text-secondary); color: var(--bg); border: none; }
+
+    button:focus-visible {
+      outline: 2px solid var(--gold);
+      outline-offset: 2px;
+    }
+
+    .progress-bar {
+      width: 100%;
+      height: 6px;
+      background: var(--surface);
+      border-radius: 3px;
+      margin-top: 8px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: var(--gold);
+      border-radius: 3px;
+      transition: width 0.3s ease;
+    }
+
+    footer {
+      margin-top: 32px;
+      text-align: center;
+      color: var(--text-secondary);
+      font-size: 0.8rem;
+    }
+
+    @media (max-width: 640px) {
+      body { padding: 16px; }
+      h1 { font-size: 1.5rem; }
+      .task-card { flex-direction: column; }
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f5f5f5;
+        --surface: #ffffff;
+        --surface-hover: #f0f0f0;
+        --text: #1a1a1a;
+        --text-secondary: #6a6f76;
+      }
+    }
+
+    @media (forced-colors: active) {
+      .task-status-icon { forced-color-adjust: none; }
+    }
+
+    @media print {
+      body { background: white; color: black; }
+      .overall-status, .task-card { border: 1px solid #ccc; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🚀 KHAOS 系统部署监控</h1>
+      <p class="subtitle">实时显示各模块启动状态，如遇错误请根据提示修复后重启服务。</p>
+    </header>
+
+    <div id="overall" class="overall-status pending" role="status" aria-live="polite">
+      <span class="task-status-icon pending" aria-hidden="true"></span>
+      <span id="overallText">正在连接部署服务...</span>
+    </div>
+
+    <div class="tasks" id="taskList" role="list" aria-label="部署任务列表"></div>
+
+    <footer>
+      KHAOS Quantitative Trading System · 刷新间隔 <span id="pollIntervalDisplay">1.5</span> 秒
+    </footer>
+  </div>
+
+  <script>
+    (function() {
+      'use strict';
+
+      // -----------------------------------------------------------------------
+      // 配置
+      // -----------------------------------------------------------------------
+      const FAST_POLL = 1500;
+      const SLOW_POLL = 5000;
+      const VERY_SLOW_POLL = 10000;
+      const MAX_CONSECUTIVE_ERRORS = 3;
+      const FETCH_TIMEOUT = 4000;
+      const REDIRECT_DELAY = 3000;
+      const REDIRECT_TARGET = '/';
+
+      let pollTimer = null;
+      let consecutiveErrors = 0;
+      let isSuccess = false;
+      let redirectTimer = null;
+      let cancelRedirect = false;
+      let currentInterval = FAST_POLL;
+
+      // DOM 元素
+      const overallEl = document.getElementById('overall');
+      const overallTextEl = document.getElementById('overallText');
+      const taskListEl = document.getElementById('taskList');
+      const pollDisplayEl = document.getElementById('pollIntervalDisplay');
+
+      // 网络自适应：根据连接类型和节省数据模式调整轮询间隔
+      function adjustPollInterval() {
+        const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+        if (connection) {
+          if (connection.saveData || /slow-2g|2g/.test(connection.effectiveType)) {
+            return VERY_SLOW_POLL;
+          }
+          if (connection.effectiveType === '3g') {
+            return SLOW_POLL;
+          }
+        }
+        if (window.matchMedia('(prefers-reduced-data: reduce)').matches) {
+          return VERY_SLOW_POLL;
+        }
+        return FAST_POLL;
+      }
+
+      function updatePollTimer(interval) {
+        clearInterval(pollTimer);
+        currentInterval = interval;
+        pollDisplayEl.textContent = (interval / 1000).toFixed(1);
+        pollTimer = setInterval(fetchProgress, interval);
+      }
+
+      // 重置错误计数并恢复快速轮询
+      function resetToFastPoll() {
+        consecutiveErrors = 0;
+        updatePollTimer(adjustPollInterval());
+      }
+
+      // -----------------------------------------------------------------------
+      // 工具函数
+      // -----------------------------------------------------------------------
+      const escapeHtml = (str) => {
+        if (!str) return '';
+        return String(str)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#039;');
+      };
+
+      const formatTime = (timestamp) => {
+        if (!timestamp) return '--';
+        return new Date(timestamp * 1000).toLocaleTimeString('zh-CN', { hour12: false });
+      };
+
+      const calcProgress = (tasks) => {
+        if (!Array.isArray(tasks) || tasks.length === 0) return 0;
+        const completed = tasks.filter(t => t.status === 'success' || t.status === 'failed').length;
+        return Math.round((completed / tasks.length) * 100);
+      };
+
+      const validateData = (data) => {
+        if (!data || typeof data !== 'object') return false;
+        if (!Array.isArray(data.tasks)) return false;
+        const validOverall = ['pending', 'running', 'success', 'failed'];
+        if (!validOverall.includes(data.overall)) return false;
+        for (const task of data.tasks) {
+          if (typeof task.name !== 'string' || task.name.length > 200) return false;
+          if (!['pending', 'running', 'success', 'failed'].includes(task.status)) return false;
+          if (task.error && typeof task.error !== 'string') return false;
+          if (task.logs && !Array.isArray(task.logs)) return false;
+        }
+        return true;
+      };
+
+      const fetchWithTimeout = async (url, timeout) => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeout);
+        try {
+          const response = await fetch(url, { signal: controller.signal, cache: 'no-store' });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return await response.json();
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      };
+
+      const safeRedirect = (url) => {
+        try {
+          const resolved = new URL(url, window.location.origin);
+          if (resolved.origin !== window.location.origin) {
+            console.warn('跳转被阻止：非同一来源');
+            return;
+          }
+          window.location.href = url;
+        } catch {
+          console.warn('跳转 URL 无效');
+        }
+      };
+
+      // 导出错误日志
+      function exportLogs(tasks) {
+        const lines = tasks.map(task => {
+          return `[${task.status.toUpperCase()}] ${task.name}: ${task.error || '无错误'} (${task.logs?.join('; ') || ''})`;
+        });
+        const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `khaos-deploy-${Date.now()}.log`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
+
+      // -----------------------------------------------------------------------
+      // 渲染
+      // -----------------------------------------------------------------------
+      const updateTitle = (status) => {
+        const titles = {
+          pending: '⏳ 部署中',
+          running: '🔄 部署中',
+          success: '✅ 部署成功',
+          failed: '❌ 部署失败'
+        };
+        document.title = `KHAOS · ${titles[status] || '部署监控'}`;
+      };
+
+      const render = (data) => {
+        const tasks = data.tasks;
+        const overall = data.overall;
+
+        updateTitle(overall);
+
+        // 总体状态
+        overallEl.className = `overall-status ${overall}`;
+        const iconEl = overallEl.querySelector('.task-status-icon');
+        if (iconEl) iconEl.className = `task-status-icon ${overall}`;
+
+        if (overall === 'success') {
+          overallTextEl.textContent = '🎉 系统已成功启动！即将跳转...';
+          if (!isSuccess) {
+            isSuccess = true;
+            clearInterval(pollTimer);
+            // 按钮区域
+            const btnContainer = overallEl.querySelector('.actions') || document.createElement('div');
+            btnContainer.className = 'actions';
+            btnContainer.innerHTML = '';
+            const cancelBtn = document.createElement('button');
+            cancelBtn.textContent = '取消跳转';
+            cancelBtn.className = 'cancel-btn';
+            cancelBtn.onclick = () => {
+              cancelRedirect = true;
+              cancelBtn.remove();
+              overallTextEl.textContent = '🎉 系统启动成功 (跳转已取消)';
+              const jumpBtn = document.createElement('button');
+              jumpBtn.textContent = '立即进入系统';
+              jumpBtn.className = 'jump-btn';
+              jumpBtn.onclick = () => safeRedirect(REDIRECT_TARGET);
+              btnContainer.appendChild(jumpBtn);
+            };
+            btnContainer.appendChild(cancelBtn);
+            if (!overallEl.contains(btnContainer)) overallEl.appendChild(btnContainer);
+            redirectTimer = setTimeout(() => {
+              if (!cancelRedirect) safeRedirect(REDIRECT_TARGET);
+            }, REDIRECT_DELAY);
+          }
+          return;
+        } else if (overall === 'failed') {
+          overallTextEl.textContent = '❌ 部署失败，请根据下方错误信息修复后重启服务。';
+          if (!overallEl.querySelector('.export-btn')) {
+            const exportBtn = document.createElement('button');
+            exportBtn.textContent = '📋 导出错误日志';
+            exportBtn.className = 'export-btn';
+            exportBtn.onclick = () => exportLogs(tasks);
+            overallEl.appendChild(exportBtn);
+          }
+        } else if (overall === 'running') {
+          overallTextEl.textContent = `⏳ 系统正在启动中... (整体进度 ${calcProgress(tasks)}%)`;
+          // 进度条
+          let progressBar = overallEl.querySelector('.progress-bar');
+          if (!progressBar) {
+            progressBar = document.createElement('div');
+            progressBar.className = 'progress-bar';
+            progressBar.setAttribute('role', 'progressbar');
+            progressBar.setAttribute('aria-valuenow', calcProgress(tasks));
+            progressBar.setAttribute('aria-valuemin', '0');
+            progressBar.setAttribute('aria-valuemax', '100');
+            overallEl.appendChild(progressBar);
+          }
+          const fill = progressBar.querySelector('.progress-fill') || (() => {
+            const f = document.createElement('div');
+            f.className = 'progress-fill';
+            progressBar.appendChild(f);
+            return f;
+          })();
+          fill.style.width = `${calcProgress(tasks)}%`;
+          progressBar.setAttribute('aria-valuenow', calcProgress(tasks));
+        } else {
+          overallTextEl.textContent = '⏳ 等待部署开始...';
+        }
+
+        // 任务列表
+        taskListEl.innerHTML = tasks.map(task => {
+          const statusIcon = {
+            pending: '⏳',
+            running: '🔄',
+            success: '✅',
+            failed: '❌'
+          }[task.status] || '❓';
+          const timeStr = task.end_time
+            ? `完成于 ${formatTime(task.end_time)}`
+            : task.start_time
+              ? `开始于 ${formatTime(task.start_time)}`
+              : '';
+          const errorHtml = task.error
+            ? `<div class="error-detail"><strong>错误详情：</strong> ${escapeHtml(task.error)}</div>`
+            : '';
+          const logs = task.logs || [];
+          const logsHtml = logs.length > 0
+            ? `<div class="logs-container">
+                <ul class="log-list" style="${logs.length > 3 ? 'max-height:60px;overflow:hidden;' : ''}">
+                  ${logs.map(log => `<li>${escapeHtml(log)}</li>`).join('')}
+                </ul>
+                ${logs.length > 3 ? '<button class="collapse-btn" type="button">展开全部</button>' : ''}
+              </div>`
+            : '';
+          return `
+            <div class="task-card" role="listitem">
+              <div class="task-status-icon ${task.status}" aria-label="任务状态: ${task.status}"></div>
+              <div class="task-content">
+                <div class="task-header">
+                  <span class="task-name">${statusIcon} ${escapeHtml(task.name)}</span>
+                  <span class="task-time">${timeStr}</span>
+                </div>
+                <div class="task-description">${escapeHtml(task.description || '')}</div>
+                ${errorHtml}
+                ${logsHtml}
+              </div>
+            </div>
+          `;
+        }).join('');
+
+        // 绑定展开按钮事件（避免内联 onclick）
+        taskListEl.querySelectorAll('.collapse-btn').forEach(btn => {
+          btn.addEventListener('click', function() {
+            const logList = this.previousElementSibling;
+            logList.style.maxHeight = 'none';
+            this.style.display = 'none';
+          });
+        });
+      };
+
+      // -----------------------------------------------------------------------
+      // 轮询逻辑
+      // -----------------------------------------------------------------------
+      async function fetchProgress() {
+        if (!navigator.onLine) {
+          overallTextEl.textContent = '⚠️ 网络已断开，等待恢复...';
+          return;
+        }
+        try {
+          const data = await fetchWithTimeout('/api/v1/deploy/progress', FETCH_TIMEOUT);
+          if (!validateData(data)) {
+            throw new Error('数据格式异常');
+          }
+          consecutiveErrors = 0;
+          render(data);
+        } catch (error) {
+          console.error('获取进度失败:', error);
+          consecutiveErrors++;
+          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+            updatePollTimer(SLOW_POLL);
+            overallTextEl.textContent = '⚠️ 连接异常，已降低刷新频率...';
+          }
+        }
+      }
+
+      // 可见性变化
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          clearInterval(pollTimer);
+        } else {
+          resetToFastPoll();
+          fetchProgress();
+        }
+      });
+
+      // 网络状态事件
+      window.addEventListener('offline', () => {
+        overallTextEl.textContent = '⚠️ 网络已断开，等待恢复...';
+        clearInterval(pollTimer);
+      });
+      window.addEventListener('online', () => {
+        overallTextEl.textContent = '网络已恢复，继续部署...';
+        resetToFastPoll();
+        fetchProgress();
+      });
+
+      // 监听节省数据模式变化
+      if (window.matchMedia) {
+        window.matchMedia('(prefers-reduced-data: reduce)').addEventListener('change', () => {
+          if (!isSuccess) updatePollTimer(adjustPollInterval());
+        });
+      }
+
+      // 启动
+      updatePollTimer(adjustPollInterval());
+      fetchProgress();
+
+      // 清理
+      window.addEventListener('beforeunload', () => {
+        clearInterval(pollTimer);
+        if (redirectTimer) clearTimeout(redirectTimer);
+      });
+    })();
+  </script>
+</body>
+</html>
