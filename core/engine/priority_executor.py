@@ -27,12 +27,17 @@
     - blocking_priorities: 阻断信号优先级集合（frozenset）
     - escape_priorities: 逃生信号优先级集合（frozenset）
 
+已知限制（生产环境需知）:
+    - _stats 非线程安全。多线程并发调用 resolve 时需外部序列化。
+    - last_call_time 为 time.monotonic() 原始值，不可直接用于墙上时钟差。
+    - 依赖 SignalPriority.value 为可比较整数（接口契约假设）。
+
 作者: KHAOS System Architect
 创建日期: 2025-06-15
 修改记录:
     - 2026-07-08 v37.0: 经过80项缺陷修复，成为华尔街级最终裁决器。
-    - 2026-07-27 v37.1 \~ v37.3: 逐步消除副作用、统一比较、对称放行、持仓缓存、action兼容。
-    - 2026-07-27 v37.4: 修复 None ratio 比较崩溃、非法 ratio 首次拦截、全局同优先级保留、持仓容错强化。
+    - 2026-07-27 v37.1\~v37.4: 消除副作用、统一比较、对称放行、持仓缓存、
+      action 兼容、非法 ratio 拦截、全局同优先级并行、统计全覆盖。
 __version__ = "37.4.0"
 __all__ = ["PriorityExecutor"]
 """
@@ -343,7 +348,6 @@ class PriorityExecutor:
             elif self._is_reduce(action):
                 ratio = self._safe_ratio(s)
                 if ratio is None:
-                    # 非法 ratio，直接丢弃该信号
                     continue
                 if not sym:
                     global_reduce.append((s, p))
@@ -351,7 +355,6 @@ class PriorityExecutor:
                     reduce_map[sym] = (s, p)
                 else:
                     existing_ratio = self._safe_ratio(reduce_map[sym][0])
-                    # existing 已保证合法（首次插入时已过滤），但防御性处理
                     if existing_ratio is None:
                         reduce_map[sym] = (s, p)
                     elif ratio > existing_ratio or (
@@ -361,12 +364,10 @@ class PriorityExecutor:
             else:
                 others.append((s, p))
 
-        # 同品种 CLOSE 优先于 REDUCE
         for sym in list(reduce_map.keys()):
             if sym in close_map:
                 del reduce_map[sym]
 
-        # 全局信号：同优先级全部保留（多指令并行），不同优先级只留最高
         def _keep_global(items: List[Tuple[Signal, SignalPriority]]) -> List[Tuple[Signal, SignalPriority]]:
             if not items:
                 return []
@@ -383,7 +384,6 @@ class PriorityExecutor:
 
     @staticmethod
     def _safe_ratio(s: Signal) -> Optional[float]:
-        """返回合法非负 ratio；非法或负值返回 None（调用方丢弃）。"""
         try:
             r = getattr(s, "reduce_ratio", 0.0)
             if r is None:
@@ -393,8 +393,8 @@ class PriorityExecutor:
                 logger.debug("Negative reduce_ratio %s on signal, discarding.", r)
                 return None
             return r
-        except (TypeError, ValueError) as exc:
-            logger.debug("Invalid reduce_ratio on signal: %s", exc)
+        except (TypeError, ValueError) as exp:
+            logger.debug("Invalid reduce_ratio on signal: %s", exp)
             return None
 
     def _filter_unnecessary_escapes(
@@ -405,11 +405,11 @@ class PriorityExecutor:
         held_symbols: Optional[Set[str]] = None
         try:
             held_symbols = self._build_held_symbols(portfolio)
-        except Exception as exc:
+        except Exception as exp:
             logger.warning(
                 "Failed to build held symbols set (%s), falling back to per-signal check. detail=%s",
-                type(exc).__name__, str(exc),
-                exc_info=True,
+                type(exp).__name__, str(exp),
+                exp_info=True,
             )
 
         filtered: List[Tuple[Signal, SignalPriority]] = []
@@ -424,11 +424,11 @@ class PriorityExecutor:
                     filtered.append((s, p))
                 else:
                     logger.debug("Suppressing escape signal for %s: no position.", sym)
-            except Exception as exc:
+            except Exception as exp:
                 logger.warning(
                     "Portfolio query failed for %s (%s), keeping escape signal. detail=%s",
-                    sym, type(exc).__name__, str(exc),
-                    exc_info=True,
+                    sym, type(exp).__name__, str(exp),
+                    exp_info=True,
                 )
                 filtered.append((s, p))
         return filtered
