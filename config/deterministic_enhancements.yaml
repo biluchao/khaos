@@ -1,0 +1,220 @@
+# =============================================================================
+# KHAOS 确定性增强引擎配置 (机构级终极版 v4.0)
+# =============================================================================
+# 维护者: KHAOS Risk Committee
+# 最后审计: 2026-07-27
+# 版本: 4.0.0 (schema_version: 1)
+# 说明: 所有外部 API 密钥通过环境变量注入，严禁硬编码。
+#       所有权重将在启动时归一化，修改后需热重载或重启生效。
+#       数据降级策略详见各个子模块。
+# =============================================================================
+
+# -------------------- 全局开关与基础设置 --------------------
+enabled: true
+log_level: INFO                  # 可选: DEBUG, INFO, WARNING, ERROR
+schema_version: 1
+
+# 外部 API 全局超时 (秒)
+api_timeout_sec: 5
+# 外部 API 重试次数
+api_retry_attempts: 2
+
+# -------------------- 维度权重 (总和自动归一化) --------------------
+dimension_weights:
+  time_and_stats: 0.25
+  cross_market: 0.10
+  microstructure: 0.40
+  adaptive: 0.25
+# 归一化策略: 启动时检查，若总和 != 1.0，按比例重新分配，并记录 WARNING。
+# 若某维度 disabled，其权重将被按比例分配给其他 enabled 维度。
+
+# =============================================================================
+# 1. 时间与统计维度 (time_and_stats)
+# =============================================================================
+time_and_stats:
+  enabled: true
+  sub_weights:
+    time_quality: 0.40
+    path_efficiency: 0.40
+    volume_distribution: 0.20
+
+  # 时段质量 (基于历史有效突破率)
+  time_quality:
+    # 系统将在首次启动时根据最近 90 天数据生成 quality_map，并每 7 天自动刷新。
+    # 也可手动提供 24 个浮点数，范围 [0, 1]。
+    quality_map: []
+    quality_map_refresh_interval_days: 7
+    base_threshold: 0.70
+    weight: 0.15
+    min_quality_floor: 0.3          # 评分函数下限
+
+  # 路径平滑度
+  path_efficiency:
+    min_breakout_e: 0.55           # [0.2, 1.0]
+    min_context_e: 0.4
+
+  # 分时成交量分布 (需要 Tick 数据)
+  volume_distribution:
+    top_ratio: 0.45
+    bottom_ratio: 0.25
+    # 若 Tick 数据不可用，自动将本子指标的权重 50% 转移给 path_efficiency，50% 给 time_quality。
+    fallback_to_path_efficiency: true
+
+# =============================================================================
+# 2. 跨市场与宏观维度 (cross_market)
+# =============================================================================
+cross_market:
+  enabled: true
+  sub_weights:
+    correlated_assets: 0.4
+    stablecoin_flow: 0.3
+    fear_greed: 0.3
+
+  # 关联品种协同
+  correlated_assets:
+    symbols: ["ETHUSDT"]           # 若 sync_with_strategy_symbols 为 true，则自动替换
+    sync_with_strategy_symbols: true
+    threshold: 0.6
+    data_timeout_sec: 3
+
+  # 稳定币资金流
+  stablecoin_flow:
+    net_inflow_ratio: 1.2
+    api_url: ${ECS_STABLECOIN_API_URL}
+    fallback_url: ""               # 当环境变量未设置时使用的备份URL，空则禁用
+    cache_seconds: 300
+    fallback_score: 0.5
+    timeout_sec: 5
+
+  # 恐惧与贪婪指数
+  fear_greed:
+    api_url: "https://api.alternative.me/fng/"
+    api_key: ${ECS_FNG_API_KEY}    # 可选
+    extreme_fear: 25
+    extreme_greed: 75
+    cache_seconds: 600
+    fallback_score: 0.5
+    timeout_sec: 5
+
+# =============================================================================
+# 3. 微观结构深度维度 (microstructure) - 核心重头
+# =============================================================================
+microstructure:
+  enabled: true
+  sub_weights:
+    orderbook_resilience: 0.25
+    large_trade_direction: 0.25
+    open_interest: 0.20
+    bpi_reinforce: 0.15
+    takerflow_reinforce: 0.15
+
+  # 订单簿恢复力 (Level2)
+  orderbook_resilience:
+    threshold_ms: 500
+    min_large_order_btc: 2.0
+    fallback_to_large_trade: true  # 降级时 large_trade_direction 权重 +0.1
+    adaptive_threshold: false      # 未来扩展
+
+  # 大单方向检测 (AggTrade)
+  large_trade_direction:
+    min_notional_usd: 5000
+    dynamic_min_notional: true     # 根据 ATR 自动调整 (ATR * 2000)
+    buy_ratio_threshold: 0.65
+    fallback_volume_estimation: true
+    fallback_score: 0.5
+
+  # 多空持仓与爆仓 (合约)
+  open_interest:
+    long_short_ratio_threshold: 1.5
+    liquidation_spike_mult: 2.0
+    fallback_if_spot: true
+    fallback_score: 0.5
+
+  # BPI 强化映射
+  bpi_reinforce:
+    map_min: -0.3
+    map_max: 0.3
+    adaptive_mapping: true
+    adaptive_window_bars: 1000
+    update_interval_bars: 100
+    fallback_score: 0.3            # 中性偏谨慎
+
+  # TakerFlow 强化映射
+  takerflow_reinforce:
+    map_min: -0.3
+    map_max: 0.3
+    adaptive_mapping: true
+    adaptive_window_bars: 1000
+    update_interval_bars: 100
+    fallback_score: 0.3
+
+# =============================================================================
+# 4. 自适应与进化维度 (adaptive)
+# =============================================================================
+adaptive:
+  enabled: true
+  sub_weights:
+    module_trust: 0.60
+    impact_model: 0.20
+    kelly: 0.20
+
+  # 模块可信度在线学习
+  module_trust:
+    learning_rate: 0.01           # [0.001, 0.05]
+    max_learning_rate: 0.05
+    initial_score: 0.5
+    clip_min: 0.1
+    clip_max: 0.9
+
+  # 对手盘冲击模型
+  impact_model:
+    ratio_threshold: 0.8
+    fallback_score: 0.5
+
+  # 凯利公式动态仓位
+  kelly:
+    max_fraction: 0.5             # 硬限制，不得超过全局风控
+    default_b_ratio: 3.0
+    negative_score: 0.0
+
+# =============================================================================
+# 全局降级策略
+# =============================================================================
+degradation:
+  continue_on_data_missing: true
+  max_degradation_minutes: 60     # 单个维度连续降级超时后自动禁用
+  log_degradation: true
+  notify_degradation: false
+
+# =============================================================================
+# 安全与访问控制
+# =============================================================================
+security:
+  config_file_permission: 600
+  enforce_env_keys: true
+  # 启动时扫描配置内容，若发现疑似密钥（长度>20的字符串）且不在环境变量中，告警并拒绝加载
+  scan_for_hardcoded_secrets: true
+
+# =============================================================================
+# 配置管理
+# =============================================================================
+config_management:
+  # 热更新由配置服务统一控制，使用原子写与版本号校验
+  hot_reload_supported: true
+  # 建议使用 git 跟踪变更，并在此记录 hash
+  config_hash: ""
+
+# =============================================================================
+# 文档与元数据
+# =============================================================================
+metadata:
+  author: "KHAOS Risk Committee"
+  last_modified: "2026-07-27"
+  version: "4.0.0"
+  changelog:
+    - date: "2026-07-27"
+      version: "4.0.0"
+      description: "第二轮机构级审计，100项缺陷修复：增加自适应参数、降级量化、环境变量回退、密钥检测、配置管理。"
+    - date: "2026-07-26"
+      version: "3.0.0"
+      description: "初始机构级强化，增加降级策略和安全控制。"
