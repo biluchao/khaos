@@ -41,7 +41,7 @@ structlog==26.1.0               # JSON 日志输出[reference:24]
 
 # ---------- 监控与指标 ----------
 prometheus_client==0.25.0       # 暴露 /metrics 端点[reference:25]
-tqdm==4.68.3                    # 进度条[reference:26]
+tqdm==4.69.1                    # 进度条[reference:26]
 
 # ---------- 配置与工具 ----------
 python-dotenv==1.2.2            # 环境变量管理[reference:27]
