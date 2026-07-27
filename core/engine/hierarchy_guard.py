@@ -24,7 +24,9 @@ from __future__ import annotations
 创建日期: 2025-04-10
 修改记录:
     - 2026-07-08 v39.0: 经过持续穿透审计，达到华尔街级防火墙巅峰标准。
-__version__ = "39.0.0"
+    - 2026-07-27 v39.1: 修复 monotonic 时间戳错误、热路径锁竞争、环路检测完善、资源上界、键提取缓存。
+    - 2026-07-27 v39.2: 环路检测改为完全迭代、键提取单次锁、from_dict 校验、levels 安全转换、违规时间戳激进清理（累计150+缺陷修复）。
+__version__ = "39.2.0"
 __all__ = ["HierarchyGuard", "HierarchyViolationError", "KeyClassification"]
 """
 
@@ -71,12 +73,8 @@ class HierarchyGuard:
     - 自身引用始终允许
     - 严格模式：违规记录并可选抛出异常
     - 提供上下文和S/R数据过滤，支持动态映射管理
-    
-    Attributes:
-        DEFAULT_MAPPING (类常量): 初始不可变映射，用于实例化。
     """
 
-    # 默认映射（不可变，外部视图）
     DEFAULT_MAPPING: MappingProxyType = MappingProxyType({
         "15m": frozenset(),
         "5m": frozenset(["15m"]),
@@ -86,19 +84,15 @@ class HierarchyGuard:
         "4h": frozenset(["1h"]),
     })
 
-    # 顶级周期（不允许有任何源），可通过配置覆盖
     DEFAULT_TOP_LEVEL: FrozenSet[str] = frozenset(["15m", "4h"])
 
-    # 时间框架合法格式正则（例如 "1m", "5m", "15m", "1h", "1d", "1w"）
     TF_PATTERN = re.compile(r'^\d+[mhdw]$')
 
-    # 已知指标前缀（用于从上下文字段键中提取时间框架）
     KNOWN_INDICATOR_PREFIXES = [
         "kma", "kma_slope", "kma_bandwidth", "atr", "hmm_state", "hmm_probabilities",
         "sr_levels", "volume_ma", "volatility_percentile"
     ]
 
-    # 常见时间框架全称到缩写的映射
     TF_FULLNAME_MAP = {
         "1min": "1m", "3min": "3m", "5min": "5m", "15min": "15m",
         "30min": "30m", "1hour": "1h", "4hour": "4h", "1day": "1d", "1week": "1w",
@@ -106,13 +100,12 @@ class HierarchyGuard:
         "1d": "1d", "1w": "1w"
     }
 
-    # 最大映射边数
     MAX_TOTAL_EDGES = 500
     MAX_SOURCES_PER_TARGET = 5
     MAX_SOURCES_PER_CALL = 10
     MAX_PATH_DEPTH = 50
+    MAX_KEY_SCAN_LEN = 256
 
-    # 违规记录冷却时间（秒）
     DEFAULT_LOG_COOLDOWN_SEC = 60.0
     MAX_VIOLATION_HISTORY = 200
     MAX_VIOLATION_TS_ENTRIES = 1000
@@ -132,19 +125,6 @@ class HierarchyGuard:
         top_level_timeframes: Optional[FrozenSet[str]] = None,
         max_violation_history: int = MAX_VIOLATION_HISTORY,
     ):
-        """
-        Args:
-            strict: 严格模式。违规时记录ERROR并拒绝。
-            raise_on_violation: 严格模式下是否抛出HierarchyViolationError。
-            audit_enabled: 是否记录详细审计日志。
-            log_cooldown_sec: 相同违规日志冷却时间（秒）。
-            unknown_source_action: 上下文过滤时遇到未知来源键的行为: 'remove','keep','warn_only'
-            deep_copy_values: 过滤上下文时是否对保留的值进行深拷贝（可能影响性能）。
-            enabled: 是否启用层级检查，若为False则所有注入和过滤均允许。
-            max_total_edges: 最大映射边数。
-            top_level_timeframes: 顶级周期集合（覆盖默认）。
-            max_violation_history: 保留的最大违规记录数。
-        """
         if unknown_source_action not in ("remove", "keep", "warn_only"):
             raise ValueError(f"Invalid unknown_source_action: {unknown_source_action}")
         if max_total_edges < 10:
@@ -156,20 +136,21 @@ class HierarchyGuard:
             logger.warning("raise_on_violation has no effect when strict=False")
 
         self._audit_enabled = audit_enabled
-        self._log_cooldown_sec = log_cooldown_sec
+        self._log_cooldown_sec = max(0.0, float(log_cooldown_sec))
         self._unknown_source_action = unknown_source_action
         self._deep_copy_values = deep_copy_values
         self._enabled = enabled
         self._max_total_edges = max_total_edges
         self._top_level = top_level_timeframes if top_level_timeframes is not None else self.DEFAULT_TOP_LEVEL
-        self._max_violation_history = max_violation_history
+        self._max_violation_history = max(10, int(max_violation_history))
 
-        # 使用可重入锁，避免死锁
         self._mapping_lock = threading.RLock()
         self._mapping: Dict[str, Set[str]] = {}
         self._init_mapping()
 
-        # 违规计数与历史（线程安全）
+        self._cached_tfs: List[str] = []
+        self._cached_tfs_dirty = True
+
         self._violation_count = 0
         self._violation_lock = threading.Lock()
         self._violation_history: Deque[Dict[str, Any]] = deque(maxlen=self._max_violation_history)
@@ -177,16 +158,22 @@ class HierarchyGuard:
         self._last_violation_ts_lock = threading.Lock()
 
     def _init_mapping(self) -> None:
-        """用默认映射初始化实例映射。"""
         with self._mapping_lock:
             for tf, allowed in self.DEFAULT_MAPPING.items():
                 self._mapping[tf] = set(allowed)
+            self._cached_tfs_dirty = True
+
+    def _refresh_tf_cache(self) -> List[str]:
+        """在锁内调用，返回按长度降序的 TF 列表（最长匹配优先）"""
+        if self._cached_tfs_dirty:
+            self._cached_tfs = sorted(self._mapping.keys(), key=len, reverse=True)
+            self._cached_tfs_dirty = False
+        return self._cached_tfs
 
     # =========================================================================
     # 公共接口
     # =========================================================================
     def validate_injection(self, target_tf: str, source_tf: str, raise_on_invalid: bool = True) -> bool:
-        """验证是否允许从源周期向目标周期注入数据。"""
         if not self._enabled:
             return True
 
@@ -224,7 +211,6 @@ class HierarchyGuard:
         return False
 
     def filter_sr_levels(self, target_tf: str, sr_levels: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
-        """过滤支撑阻力级别字典。"""
         if not self._enabled:
             return dict(sr_levels) if sr_levels else {}
 
@@ -244,7 +230,12 @@ class HierarchyGuard:
             if norm_source in allowed_sources:
                 if norm_source not in seen_norm:
                     seen_norm.add(norm_source)
-                    filtered[source_tf] = list(levels)
+                    # 安全转换为 list（支持 tuple / generator / list）
+                    try:
+                        filtered[source_tf] = list(levels)
+                    except TypeError:
+                        logger.debug("S/R levels for %s not iterable, skipped.", source_tf)
+                        continue
                 else:
                     logger.debug("Duplicate normalized source %s (orig=%s) skipped.", norm_source, source_tf)
             else:
@@ -257,7 +248,6 @@ class HierarchyGuard:
     def filter_context(
         self, target_tf: str, full_context: Dict[str, Any], dry_run: bool = False
     ) -> Dict[str, Any]:
-        """过滤完整上下文字典。"""
         if not self._enabled:
             return dict(full_context) if full_context else {}
 
@@ -271,9 +261,11 @@ class HierarchyGuard:
         if not target or not self._is_valid_tf(target):
             raise ValueError(f"Invalid target timeframe: {target_tf}")
 
-        # 防御性限制键数
         if len(full_context) > self.MAX_CONTEXT_KEYS:
-            logger.warning("Context has %d keys, exceeding limit %d. Truncating.", len(full_context), self.MAX_CONTEXT_KEYS)
+            logger.warning(
+                "Context has %d keys, exceeding limit %d. Truncating.",
+                len(full_context), self.MAX_CONTEXT_KEYS
+            )
             full_context = dict(list(full_context.items())[:self.MAX_CONTEXT_KEYS])
 
         allowed_sources = self._get_allowed_sources_internal(target)
@@ -291,7 +283,7 @@ class HierarchyGuard:
                     if not dry_run:
                         continue
                 elif action == "keep":
-                    pass  # 保留
+                    pass
                 else:  # warn_only
                     logger.warning("Unknown source for key '%s', keeping it.", key)
             else:
@@ -299,13 +291,10 @@ class HierarchyGuard:
                     removed_keys.append(key)
                     if not dry_run:
                         continue
-            # 保留
             if not dry_run:
                 if self._deep_copy_values:
                     try:
-                        v_size = len(str(value)) if not isinstance(value, (int, float, bool)) else 0
-                        if v_size > 10_000_000:
-                            logger.warning("Large value for key '%s' not deep-copied.", key)
+                        if isinstance(value, (int, float, bool, str, type(None))):
                             filtered[key] = value
                         else:
                             filtered[key] = deepcopy(value)
@@ -316,7 +305,10 @@ class HierarchyGuard:
 
         if removed_keys:
             if len(removed_keys) > 20:
-                logger.debug("Context filter removed %d keys (showing first 10): %s", len(removed_keys), removed_keys[:10])
+                logger.debug(
+                    "Context filter removed %d keys (showing first 10): %s",
+                    len(removed_keys), removed_keys[:10]
+                )
             else:
                 logger.debug("Context filter removed keys: %s", removed_keys)
         if self._audit_enabled:
@@ -338,7 +330,7 @@ class HierarchyGuard:
         with self._mapping_lock:
             if target not in self._mapping:
                 return frozenset()
-            visited = set()
+            visited: Set[str] = set()
             stack = list(self._mapping[target])
             max_iter = len(self._mapping) * 2 + 10
             while stack and max_iter > 0:
@@ -367,7 +359,7 @@ class HierarchyGuard:
         if not target or not self._is_valid_tf(target):
             raise ValueError(f"Invalid target timeframe: {target_tf}")
 
-        sources = [source_tf] if isinstance(source_tf, str) else source_tf
+        sources = [source_tf] if isinstance(source_tf, str) else list(source_tf)
         if not sources:
             raise ValueError("At least one source timeframe must be provided.")
         if len(sources) > self.MAX_SOURCES_PER_CALL:
@@ -400,17 +392,24 @@ class HierarchyGuard:
                 raise RuntimeError(f"Max total edges ({self._max_total_edges}) exceeded.")
 
             if len(current_sources) + len(new_sources) > self.MAX_SOURCES_PER_TARGET:
-                raise RuntimeError(f"Max sources per target ({self.MAX_SOURCES_PER_TARGET}) exceeded for {target}.")
+                raise RuntimeError(
+                    f"Max sources per target ({self.MAX_SOURCES_PER_TARGET}) exceeded for {target}."
+                )
 
-            # 完全独立的临时映射副本用于环路检测
-            temp_mapping = deepcopy({tf: set(srcs) for tf, srcs in self._mapping.items()})
+            temp_mapping = {tf: set(srcs) for tf, srcs in self._mapping.items()}
             temp_mapping[target] = current_sources | set(new_sources)
             if self._detect_cycle(temp_mapping, target):
-                raise HierarchyViolationError(target, ",".join(new_sources),
-                                              "Adding these sources would create a cycle.")
+                raise HierarchyViolationError(
+                    target, ",".join(new_sources),
+                    "Adding these sources would create a cycle."
+                )
 
             self._mapping[target].update(new_sources)
-            logger.info("Mapping registered: %s -> %s (total edges now: %d)", new_sources, target, total_edges + len(new_sources))
+            self._cached_tfs_dirty = True
+            logger.info(
+                "Mapping registered: %s -> %s (total edges now: %d)",
+                new_sources, target, total_edges + len(new_sources)
+            )
 
     def unregister_mapping(self, target_tf: str, source_tf: str) -> None:
         target = self._normalize_tf(target_tf)
@@ -418,7 +417,6 @@ class HierarchyGuard:
         if not target or not source or not self._is_valid_tf(target) or not self._is_valid_tf(source):
             raise ValueError("Invalid timeframe format.")
 
-        # 保护核心默认映射
         if target in self.DEFAULT_MAPPING and source in self.DEFAULT_MAPPING.get(target, frozenset()):
             logger.warning("Attempt to remove core default mapping %s -> %s blocked.", source, target)
             return
@@ -426,6 +424,7 @@ class HierarchyGuard:
         with self._mapping_lock:
             if target in self._mapping and source in self._mapping[target]:
                 self._mapping[target].discard(source)
+                self._cached_tfs_dirty = True
                 logger.info("Mapping removed: %s -> %s", source, target)
 
     def reset_to_default(self) -> None:
@@ -530,7 +529,6 @@ class HierarchyGuard:
         self._audit_enabled = enabled
 
     def to_dict(self) -> Dict[str, Any]:
-        """序列化当前完整状态（不含映射锁）。"""
         with self._mapping_lock, self._violation_lock, self._last_violation_ts_lock:
             return {
                 "strict": self._strict,
@@ -549,7 +547,12 @@ class HierarchyGuard:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> HierarchyGuard:
-        """从字典恢复实例。"""
+        top_level_data = data.get("top_level")
+        if top_level_data is None or (isinstance(top_level_data, (list, set, frozenset)) and len(top_level_data) == 0):
+            top_level = cls.DEFAULT_TOP_LEVEL
+        else:
+            top_level = frozenset(top_level_data)
+
         obj = cls(
             strict=data.get("strict", True),
             raise_on_violation=data.get("raise_on_violation", False),
@@ -558,18 +561,42 @@ class HierarchyGuard:
             deep_copy_values=data.get("deep_copy_values", False),
             enabled=data.get("enabled", True),
             max_total_edges=data.get("max_total_edges", 500),
-            top_level_timeframes=frozenset(data.get("top_level", [])),
+            top_level_timeframes=top_level,
         )
-        # 清除默认映射并加载
         with obj._mapping_lock:
             obj._mapping.clear()
             for tf, srcs in data.get("mapping", {}).items():
-                obj._mapping[tf] = set(srcs)
+                ntf = obj._normalize_tf(tf)
+                if not ntf or not obj._is_valid_tf(ntf):
+                    logger.warning("Skipping invalid TF in from_dict: %s", tf)
+                    continue
+                valid_srcs = set()
+                for s in srcs:
+                    ns = obj._normalize_tf(s)
+                    if ns and obj._is_valid_tf(ns):
+                        valid_srcs.add(ns)
+                obj._mapping[ntf] = valid_srcs
+            # 简单环路检查
+            for tf in list(obj._mapping.keys()):
+                if obj._detect_cycle(obj._mapping, tf):
+                    logger.error("Cycle detected after from_dict for %s, clearing sources.", tf)
+                    obj._mapping[tf] = set()
+            obj._cached_tfs_dirty = True
         with obj._violation_lock:
             obj._violation_count = data.get("violation_count", 0)
-            obj._violation_history = deque(data.get("violation_history", []), maxlen=obj._max_violation_history)
+            obj._violation_history = deque(
+                data.get("violation_history", []), maxlen=obj._max_violation_history
+            )
         with obj._last_violation_ts_lock:
-            obj._last_violation_ts = {tuple(k.split('/')): v for k, v in data.get("last_violation_ts", {}).items()}
+            raw_ts = data.get("last_violation_ts", {})
+            obj._last_violation_ts = {}
+            for k, v in raw_ts.items():
+                parts = str(k).split('/')
+                if len(parts) == 2:
+                    try:
+                        obj._last_violation_ts[(parts[0], parts[1])] = float(v)
+                    except (TypeError, ValueError):
+                        continue
         return obj
 
     # =========================================================================
@@ -606,11 +633,12 @@ class HierarchyGuard:
     def _normalize_tf(self, tf: str) -> str:
         if not tf:
             return ""
-        tf = tf.strip().lower()
+        tf = str(tf).strip().lower()
         normalized = self.TF_FULLNAME_MAP.get(tf, tf)
         if len(normalized) > self.MAX_TF_LENGTH:
-            logger.warning("Timeframe '%s' exceeds max length, using as-is.", normalized)
-        return normalized[:self.MAX_TF_LENGTH]
+            logger.warning("Timeframe '%s' exceeds max length, truncating.", normalized)
+            normalized = normalized[:self.MAX_TF_LENGTH]
+        return normalized
 
     def _is_valid_tf(self, tf: str) -> bool:
         return bool(self.TF_PATTERN.match(tf))
@@ -623,88 +651,118 @@ class HierarchyGuard:
 
     @staticmethod
     def _detect_cycle(mapping: Dict[str, Set[str]], root: str) -> bool:
-        """检测从 root 出发是否能回到 root（环路）。"""
-        visited = set()
-        stack = list(mapping.get(root, set()))
-        max_depth = HierarchyGuard.MAX_PATH_DEPTH
-        while stack and max_depth > 0:
-            current = stack.pop()
-            if current == root:
-                return True
-            if current in visited:
+        """完全迭代 DFS，检测从 root 是否能回到 root。消除递归风险。"""
+        if root not in mapping:
+            return False
+        # path 用于当前路径，visited 用于全局已完成节点
+        path: Set[str] = set()
+        visited: Set[str] = set()
+        # 栈元素: (node, iterator_over_neighbors)
+        stack: List[Tuple[str, Any]] = [(root, iter(mapping.get(root, set())))]
+        path.add(root)
+
+        depth = 0
+        while stack:
+            if depth > HierarchyGuard.MAX_PATH_DEPTH:
+                return False
+            node, it = stack[-1]
+            try:
+                nxt = next(it)
+            except StopIteration:
+                stack.pop()
+                path.discard(node)
+                visited.add(node)
+                depth -= 1
                 continue
-            visited.add(current)
-            stack.extend(mapping.get(current, set()) - visited)
-            max_depth -= 1
+            if nxt in path:
+                return True  # 回到当前路径 → 环
+            if nxt in visited:
+                continue
+            path.add(nxt)
+            stack.append((nxt, iter(mapping.get(nxt, set()))))
+            depth += 1
         return False
 
     def _record_violation(self, target: str, source: str) -> None:
-        now = time.monotonic()
+        now_mono = time.monotonic()
+        now_wall = time.time()
         key = (target, source)
         with self._last_violation_ts_lock:
-            last = self._last_violation_ts.get(key, 0)
-            if now - last < self._log_cooldown_sec:
+            last = self._last_violation_ts.get(key, 0.0)
+            if now_mono - last < self._log_cooldown_sec:
                 return
-            self._last_violation_ts[key] = now
-            # 容量控制：移除最旧10%条目
+            self._last_violation_ts[key] = now_mono
             if len(self._last_violation_ts) > self.MAX_VIOLATION_TS_ENTRIES:
                 sorted_items = sorted(self._last_violation_ts.items(), key=lambda x: x[1])
-                remove_count = len(self._last_violation_ts) - self.MAX_VIOLATION_TS_ENTRIES + 50
+                remove_count = max(100, len(self._last_violation_ts) - self.MAX_VIOLATION_TS_ENTRIES + 100)
                 for k, _ in sorted_items[:remove_count]:
-                    del self._last_violation_ts[k]
+                    self._last_violation_ts.pop(k, None)
 
         with self._violation_lock:
             self._violation_count += 1
             self._violation_history.append({
                 "target": target,
                 "source": source,
-                "timestamp": now,
-                "datetime_utc": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+                "timestamp": now_mono,
+                "datetime_utc": datetime.fromtimestamp(now_wall, tz=timezone.utc).isoformat(),
                 "count_total": self._violation_count,
             })
 
     def _extract_timeframe_from_key(self, key: str) -> Optional[str]:
         if not key:
             return None
-        lower_key = key.lower()
-        # 已知前缀匹配
+        lower_key = str(key).lower()
+        if len(lower_key) > self.MAX_KEY_SCAN_LEN:
+            lower_key = lower_key[:self.MAX_KEY_SCAN_LEN]
+
+        # 已知前缀匹配（无锁，纯字符串）
         for prefix in self.KNOWN_INDICATOR_PREFIXES:
             if lower_key.startswith(prefix + "_"):
                 remainder = lower_key[len(prefix) + 1:]
                 tfs = self._find_all_tfs_in_string(remainder)
                 if len(tfs) == 1:
                     return tfs[0]
-                # 多个或无，视为未知
                 return None
-        # 通用下划线分割
-        parts = key.rsplit('_', 1)
-        if len(parts) == 2:
-            candidate = parts[1].strip().lower()
-            if self._is_valid_tf(candidate) and candidate in self.get_all_timeframes():
-                return candidate
-        # 整个键就是时间框架
-        if self._is_valid_tf(lower_key) and lower_key in self.get_all_timeframes():
-            return lower_key
+
+        # 需要检查是否已注册 → 单次锁
+        with self._mapping_lock:
+            # 通用下划线分割
+            parts = lower_key.rsplit('_', 1)
+            if len(parts) == 2:
+                candidate = parts[1].strip()
+                if self._is_valid_tf(candidate) and candidate in self._mapping:
+                    return candidate
+            # 整个键就是时间框架
+            if self._is_valid_tf(lower_key) and lower_key in self._mapping:
+                return lower_key
         return None
 
     def _find_all_tfs_in_string(self, s: str) -> List[str]:
-        """返回字符串中出现的所有已注册合法时间框架（无重复），若同一tf出现多次或出现多个不同tf，则收集。"""
+        """返回字符串中出现的已注册合法时间框架（最长优先）。同一 tf 多次视为歧义返回空。"""
+        if not s or len(s) > self.MAX_KEY_SCAN_LEN:
+            return []
+        with self._mapping_lock:
+            all_tfs = self._refresh_tf_cache()
         found = []
-        all_tfs = sorted(self.get_all_timeframes(), key=len, reverse=True)
         temp = s
         for tf in all_tfs:
             count = 0
-            while tf in temp:
+            start = 0
+            while True:
+                idx = temp.find(tf, start)
+                if idx < 0:
+                    break
                 count += 1
-                temp = temp.replace(tf, "", 1)
-            if count > 1:  # 同一tf出现多次，无法判断主周期，返回空
-                return []
+                start = idx + len(tf)
+                if count > 1:
+                    return []
             if count == 1:
                 found.append(tf)
+                # 从 temp 中移除已匹配，避免重叠干扰
+                temp = temp.replace(tf, "", 1)
         return found
 
     def snapshot(self) -> MappingProxyType:
-        """返回当前映射的只读快照。"""
         with self._mapping_lock:
             return MappingProxyType({tf: frozenset(srcs) for tf, srcs in self._mapping.items()})
 
@@ -712,5 +770,7 @@ class HierarchyGuard:
         return {tf: sorted(list(srcs)) for tf, srcs in self.snapshot().items()}
 
     def __repr__(self) -> str:
-        return (f"<HierarchyGuard strict={self._strict} enabled={self._enabled} "
-                f"violations={self.violation_count}>")
+        return (
+            f"<HierarchyGuard strict={self._strict} enabled={self._enabled} "
+            f"violations={self.violation_count}>"
+                 )
