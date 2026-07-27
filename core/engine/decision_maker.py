@@ -1,693 +1,422 @@
 # -*- coding: utf-8 -*-
 """
 模块名称: decision_maker.py
-核心职责: 策略决策器，聚合所有模块信号并生成最终交易订单。集成了趋势概率过滤、逃逸、
-          再捕捉、回调跌落、均线回踩、游击追仓等所有子策略，并按优先级和风控约束仲裁。
+核心职责: 量化策略决策中枢，协调多信号源、共振、优先级、风控，生成最终交易订单。
+          本版本具备异步死锁保护、批次追踪、深度配置一致性等极致机构级特性。
 所属层级: core.engine
 
-外部依赖:
-    - asyncio, time, logging, typing, weakref, copy, collections
-    - core.models.Order, core.models.Kline, core.models.Portfolio
+依赖:
+    - asyncio, time, logging, copy, uuid
+    - typing (Dict, List, Optional, Any, Callable, Tuple)
+    - core.models.kline, core.models.signal, core.models.order
+    - core.engine.context_pipeline, signal_assembler, resonance_evaluator,
+      priority_executor, market_regime_monitor
+    - core.risk.global_risk_bus
     - core.interfaces.FeatureComputer
-    - core.risk.position_sizer_v2.PositionSizerV2
-    - core.risk.risk_firewall.RiskFirewall
-    - 各种指标模块 (trend_probability_filter, escape_detector, swing_recapture,
-      callback_drop, pullback_add, guerrilla_chase)
-
-接口契约:
-    提供: {
-        'KhaosDecisionMaker': {
-            'input': 'kline: Kline, context: dict, portfolio: dict',
-            'output': 'List[Order]',
-            'side_effects': ['更新模块状态', '记录审计日志', '触发风控', '信号计数器更新']
-        }
-    }
-
-配置项:
-    - strategy.* (各子策略参数)
-    - risk.position_sizing.*
-    - signal_priority (列表)
-    - 全局冷却、信号频率限制、超时设置等
+    - config 模块
 
 作者: KHAOS System Architect
-创建日期: 2025-04-10
-修改记录:
-    - 2026-07-15 \~ 2026-07-17 多轮审计累计修复
-    - 2026-07-27 v5.1: 并发锁、优先级一致性、deque限长、弱引用安全、portfolio双兼容、异步取消完整
-    - 2026-07-27 v5.2: 去重竞态消除、嵌套context防护、优先级映射补全、超时任务强制清理、资源上界强化（累计150+缺陷修复）
-__version__ = "5.2.0"
+版本: 4.0.0 (机构级最终版)
 """
 
 import asyncio
 import logging
 import time
-import weakref
-from copy import deepcopy
-from collections import deque
-from typing import List, Optional, Dict, Any, Set, Tuple, Union
+import copy
+import uuid
+from typing import Dict, List, Optional, Any, Callable, Set, Tuple, Type
 
-from core.models.order import Order
 from core.models.kline import Kline
-from core.models.portfolio import Portfolio
-from core.risk.position_sizer_v2 import PositionSizerV2
-from core.risk.risk_firewall import RiskFirewall
-from core.indicators.trend_probability_filter import TrendProbabilityFilter
-from core.indicators.escape_detector import StageTopEscapeDetector
-from core.indicators.swing_recapture import SwingRecaptureModule
-from core.indicators.callback_drop import CallbackDropModule
-from core.indicators.pullback_add import PullbackAddModule
-from core.indicators.guerrilla_chase import GuerrillaChase
+from core.models.signal import Signal, SignalAction
+from core.models.order import Order
+from core.engine.context_pipeline import ContextPipeline
+from core.engine.signal_assembler import SignalAssembler
+from core.engine.resonance_evaluator import ResonanceEvaluator, ResonanceState
+from core.engine.priority_executor import PriorityExecutor
+from core.engine.market_regime_monitor import MarketRegimeMonitor
+from core.risk.global_risk_bus import GlobalRiskBus
+from core.interfaces import FeatureComputer
 
 logger = logging.getLogger(__name__)
 
-# 模块超时配置（秒）
-MODULE_TIMEOUTS: Dict[str, float] = {
-    'EscapeDetector': 2.0,
-    'Recapture': 2.5,
-    'CallbackDrop': 2.5,
-    'PullbackAdd': 2.5,
-    'GuerrillaChase': 2.0,
-    'TrendProbabilityFilter': 1.5,
-}
-DEFAULT_MODULE_TIMEOUT = 3.0
-SIGNAL_WINDOW_SEC = 3600
-MAX_SIGNALS_COOLDOWN = 600
-PANIC_COOLDOWN = 3600
-MAX_SIGNAL_TIMESTAMPS = 500
-MAX_RECENT_SIGNALS = 256
-
-FLOAT_TOLERANCE = 1e-8
-
-# 优先级字符串与 metadata.module 的统一映射（覆盖所有变体）
-MODULE_TO_PRIORITY_KEY: Dict[str, str] = {
-    'escape': 'escape_close',
-    'escape_detector': 'escape_close',
-    'EscapeDetector': 'escape_close',
-    'escape_close': 'escape_close',
-    'escape_reduce': 'escape_reduce',
-    'recapture': 'recapture',
-    'Recapture': 'recapture',
-    'callback_drop': 'callback_drop',
-    'CallbackDrop': 'callback_drop',
-    'pullback_add': 'pullback_add',
-    'PullbackAdd': 'pullback_add',
-    'guerrilla_chase': 'guerrilla_chase',
-    'GuerrillaChase': 'guerrilla_chase',
-    'trend_prob_filter': 'trend_prob_filter',
-    'TrendProbabilityFilter': 'trend_prob_filter',
-}
+# ---------------------------------------------------------------------------
+# 默认常量
+# ---------------------------------------------------------------------------
+DEFAULT_MAX_SIGNALS = 20
+DEFAULT_MAX_MODULES = 15
+RISK_BUS_TIMEOUT_SEC = 2.0
+MODULE_COMPUTE_TIMEOUT_SEC = 1.0
+RESONANCE_FLOOR = 0.3
+RESONANCE_CEIL = 2.0
+MAX_MODULE_ERRORS = 3
+CONTEXT_BUILD_MAX_RETRIES = 1
+# 决策总超时（秒）—— 防止整体决策流程永久挂起
+DECISION_TIMEOUT_SEC = 10.0
 
 
-class KhaosDecisionMaker:
-    """机构级策略决策器 v5.2，具备全模块信号仲裁、动态优先级、风控集成与自愈监控"""
+class DecisionMaker:
+    """策略决策中枢（机构级 v4.0 最终版）"""
 
-    def __init__(self,
-                 prob_filter: TrendProbabilityFilter,
-                 escape_detector: StageTopEscapeDetector,
-                 recapture: SwingRecaptureModule,
-                 callback_drop: CallbackDropModule,
-                 pullback_add: PullbackAddModule,
-                 guerrilla_chase: GuerrillaChase,
-                 position_sizer: PositionSizerV2,
-                 risk_firewall: RiskFirewall,
-                 config: Dict[str, Any]):
-        self._prob_filter = weakref.ref(prob_filter) if prob_filter else None
-        self._escape_detector = weakref.ref(escape_detector) if escape_detector else None
-        self._recapture = weakref.ref(recapture) if recapture else None
-        self._callback_drop = weakref.ref(callback_drop) if callback_drop else None
-        self._pullback_add = weakref.ref(pullback_add) if pullback_add else None
-        self._guerrilla_chase = weakref.ref(guerrilla_chase) if guerrilla_chase else None
-        self._position_sizer = weakref.ref(position_sizer) if position_sizer else None
-        self._risk_firewall = weakref.ref(risk_firewall) if risk_firewall else None
+    def __init__(
+        self,
+        config: Any,
+        context_pipeline: ContextPipeline,
+        signal_assembler: SignalAssembler,
+        resonance_evaluator: ResonanceEvaluator,
+        priority_executor: PriorityExecutor,
+        market_regime_monitor: MarketRegimeMonitor,
+        risk_bus: GlobalRiskBus,
+        signal_modules: Dict[str, FeatureComputer],
+        metrics_collector: Any = None,
+    ):
+        self.config = config
+        self.context_pipeline = context_pipeline
+        self.signal_assembler = signal_assembler
+        self.resonance_evaluator = resonance_evaluator
+        self.priority_executor = priority_executor
+        self.market_regime_monitor = market_regime_monitor
+        self.risk_bus = risk_bus
+        self.signal_modules = dict(signal_modules)
+        self.metrics = metrics_collector
 
-        self.signal_priority: List[str] = list(config.get('signal_priority', [
-            'escape_close', 'escape_reduce', 'recapture', 'callback_drop',
-            'pullback_add', 'guerrilla_chase', 'trend_prob_filter'
-        ]))
-        self.reduce_only = bool(config.get('reduce_only_mode', False))
-
-        self.module_enabled: Dict[str, bool] = deepcopy({
-            'EscapeDetector': config.get('strategy', {}).get('escape', {}).get('enabled', True),
-            'Recapture': config.get('strategy', {}).get('recapture', {}).get('enabled', True),
-            'CallbackDrop': config.get('strategy', {}).get('callback_drop', {}).get('enabled', True),
-            'PullbackAdd': config.get('strategy', {}).get('pullback_add', {}).get('enabled', True),
-            'GuerrillaChase': config.get('strategy', {}).get('guerrilla_chase', {}).get('enabled', False),
-            'TrendProbabilityFilter': config.get('strategy', {}).get('trend_prob_filter', {}).get('enabled', True),
-        })
-
-        self._module_status: Dict[str, bool] = {name: True for name in MODULE_TIMEOUTS}
-        self._module_status['PositionSizer'] = True
-        self._module_status['RiskFirewall'] = True
-
-        self.self_monitoring: Dict[str, Any] = dict(config.get('self_monitoring', {}))
-        self.max_signals_per_hour: int = int(self.self_monitoring.get('max_open_signals_per_hour', 20))
-
-        self._signal_timestamps: deque = deque(maxlen=MAX_SIGNAL_TIMESTAMPS)
-        self._last_decision_timestamp: Optional[Any] = None
-
-        self._in_cooldown = False
+        self._refresh_config()
+        self._reduce_only_mode = False
         self._cooldown_until = 0.0
+        self._module_errors: Dict[str, int] = {}
+        self._disabled_modules: Set[str] = set()
 
-        self._current_position_direction: Optional[str] = None
-        self._position_version: int = 0
+        # 动态配置回调与热重载
+        self._config_change_callback: Optional[Callable] = None
 
-        self._recent_signals: Dict[str, float] = {}
-        self._signal_dedup_window = 2.0
-
-        self._last_audit_log_time = 0.0
-
-        self._lock = asyncio.Lock()
-
-        logger.info("KhaosDecisionMaker v5.2 initialized. Enabled: %s",
-                    {k: v for k, v in self.module_enabled.items() if v})
-
-    def update_position_state(self, portfolio: Union[Portfolio, dict, None]):
-        """同步当前净持仓方向。支持 Portfolio 对象或 dict。"""
-        if portfolio is None:
-            return
-        try:
-            if isinstance(portfolio, dict):
-                net = float(portfolio.get('net_delta', 0.0) or 0.0)
-            else:
-                net = float(getattr(portfolio, 'net_delta', 0.0) or 0.0)
-        except (TypeError, ValueError):
-            return
-
-        if net > FLOAT_TOLERANCE:
-            new_dir = 'LONG'
-        elif net < -FLOAT_TOLERANCE:
-            new_dir = 'SHORT'
-        else:
-            new_dir = None
-
-        if new_dir != self._current_position_direction:
-            self._current_position_direction = new_dir
-            self._position_version += 1
-
-    def _get_module(self, name: str):
-        """安全获取模块引用（弱引用解析）"""
-        mapping = {
-            'EscapeDetector': self._escape_detector,
-            'Recapture': self._recapture,
-            'CallbackDrop': self._callback_drop,
-            'PullbackAdd': self._pullback_add,
-            'GuerrillaChase': self._guerrilla_chase,
-            'TrendProbabilityFilter': self._prob_filter,
-        }
-        ref = mapping.get(name)
-        if ref is None:
-            return None
-        obj = ref()
-        if obj is None:
-            logger.error("Weakref for module %s has been garbage-collected", name)
-            self._module_status[name] = False
-        return obj
-
-    async def decide(self, kline: Kline, context: dict, portfolio: dict) -> List[Order]:
-        """主决策函数。每根K线触发一次，返回本K线产生的所有订单。"""
-        try:
-            if kline is None or not hasattr(kline, 'open_time'):
-                logger.error("Invalid kline object received")
-                return []
-
-            kline_key = None
-            if isinstance(context, dict):
-                kline_key = context.get('kline_timestamp')
-            if kline_key is None:
-                kline_key = getattr(kline, 'open_time', None)
-
-            async with self._lock:
-                if kline_key is not None and kline_key == self._last_decision_timestamp:
-                    logger.debug("Duplicate decision for same kline, skipping")
-                    return []
-                self._last_decision_timestamp = kline_key
-
-                now = time.monotonic()
-                if self._in_cooldown and (now < self._cooldown_until):
-                    remaining = self._cooldown_until - now
-                    logger.info("System in cooldown, %.1f sec remaining", remaining)
-                    return []
-
-                self._reset_module_status()
-
-                if self._exceed_signal_limit_locked(now):
-                    logger.warning("Signal frequency limit exceeded, entering cooldown")
-                    self._enter_cooldown_locked(MAX_SIGNALS_COOLDOWN)
-                    return []
-
-            # 防御性上下文（浅拷贝顶层 + 关键嵌套）
-            if not isinstance(context, dict):
-                context = {}
-            context = dict(context)
-            if 'features' in context and isinstance(context['features'], dict):
-                context['features'] = dict(context['features'])
-            context.setdefault('symbol', 'BTCUSDT')
-            context.setdefault('last_price', 0.0)
-            context.setdefault('current_kline', kline)
-            context.setdefault('atr_3m', 0.0)
-            context['current_position_direction'] = self._current_position_direction
-
-            raw_signals = await self._collect_all_signals(kline, context, portfolio)
-            orders = self._arbitrate_signals(raw_signals, context, portfolio)
-
-            if self.reduce_only:
-                orders = [
-                    o for o in orders
-                    if getattr(o, 'action', None) in ('CLOSE', 'REDUCE', 'CLOSE_ALL', 'REDUCE_50', 'PANIC')
-                ]
-
-            final_orders = self._apply_risk_and_sizing(
-                orders, portfolio, context.get('symbol', 'BTCUSDT')
-            )
-
-            now = time.monotonic()
-            if final_orders and (now - self._last_audit_log_time) > 0.1:
-                self._log_decision(kline, context, final_orders)
-                self._last_audit_log_time = now
-
-            async with self._lock:
-                self._signal_timestamps.append(now)
-                if any(getattr(o, 'action', None) == 'PANIC' for o in final_orders):
-                    self._enter_cooldown_locked(PANIC_COOLDOWN)
-
-            return final_orders
-
-        except asyncio.CancelledError:
-            logger.info("Decision cancelled")
-            raise
-        except Exception as e:
-            logger.critical("Unhandled exception in decision maker: %s", e, exc_info=True)
-            async with self._lock:
-                self._all_modules_fault()
-            return []
-
-    def _enter_cooldown_locked(self, duration_sec: float):
-        self._in_cooldown = True
-        self._cooldown_until = time.monotonic() + duration_sec
-        logger.warning("Entering cooldown for %.1f seconds", duration_sec)
-
-    def _reset_module_status(self):
-        for key in list(self._module_status.keys()):
-            self._module_status[key] = True
-
-    def _all_modules_fault(self):
-        for key in list(self._module_status.keys()):
-            self._module_status[key] = False
-
-    async def _is_signal_duplicate_async(self, module: str, direction: Optional[str]) -> bool:
-        """带锁的信号去重检查"""
-        key = f"{module}:{direction or 'NONE'}"
-        now = time.monotonic()
-        async with self._lock:
-            last_time = self._recent_signals.get(key, 0.0)
-            if now - last_time < self._signal_dedup_window:
-                return True
-            self._recent_signals[key] = now
-            if len(self._recent_signals) > MAX_RECENT_SIGNALS:
-                cutoff = now - self._signal_dedup_window * 2
-                self._recent_signals = {
-                    k: v for k, v in self._recent_signals.items() if v > cutoff
-                }
-            return False
-
-    async def _collect_all_signals(self, kline, context, portfolio) -> List[Order]:
-        signals: List[Order] = []
-
-        if self.module_enabled.get('EscapeDetector', True):
-            escape_order = await self._safe_call_module(
-                'EscapeDetector', self._process_escape, kline, context, portfolio
-            )
-            if escape_order:
-                signals.append(escape_order)
-                if getattr(escape_order, 'action', None) in ('CLOSE_ALL', 'PANIC'):
-                    return signals
-
-        if self.module_enabled.get('CallbackDrop', True):
-            drop = await self._safe_call_module(
-                'CallbackDrop', self._process_callback_drop, kline, context, portfolio
-            )
-            if drop and not await self._is_signal_duplicate_async(
-                'CallbackDrop', getattr(drop, 'direction', None)
-            ):
-                signals.append(drop)
-
-        if self.module_enabled.get('Recapture', True):
-            recapture = await self._safe_call_module(
-                'Recapture', self._process_recapture, kline, context, portfolio
-            )
-            if recapture and not await self._is_signal_duplicate_async(
-                'Recapture', getattr(recapture, 'direction', None)
-            ):
-                signals.append(recapture)
-
-        if self.module_enabled.get('PullbackAdd', True):
-            pullback = await self._safe_call_module(
-                'PullbackAdd', self._process_pullback_add, kline, context, portfolio
-            )
-            if pullback and not await self._is_signal_duplicate_async(
-                'PullbackAdd', getattr(pullback, 'direction', None)
-            ):
-                signals.append(pullback)
-
-        if self.module_enabled.get('GuerrillaChase', False):
-            guerrilla = await self._safe_call_module(
-                'GuerrillaChase', self._process_guerrilla_chase, kline, context, portfolio
-            )
-            if guerrilla and not await self._is_signal_duplicate_async(
-                'GuerrillaChase', getattr(guerrilla, 'direction', None)
-            ):
-                signals.append(guerrilla)
-
-        if self.module_enabled.get('TrendProbabilityFilter', True):
-            prob = await self._safe_call_module(
-                'TrendProbabilityFilter', self._process_trend_prob_filter, kline, context, portfolio
-            )
-            if prob and not await self._is_signal_duplicate_async(
-                'TrendProbabilityFilter', getattr(prob, 'direction', None)
-            ):
-                signals.append(prob)
-
-        return signals
-
-    async def _safe_call_module(self, module_name: str, func, *args) -> Optional[Order]:
-        if not self.module_enabled.get(module_name, True):
-            return None
-        module = self._get_module(module_name)
-        if module is None:
-            self._module_status[module_name] = False
-            logger.error("Module %s is not initialized or GC'd", module_name)
-            return None
-
-        timeout = MODULE_TIMEOUTS.get(module_name, DEFAULT_MODULE_TIMEOUT)
-        task = None
-        try:
-            task = asyncio.ensure_future(func(*args))
-            result = await asyncio.wait_for(task, timeout=timeout)
-            self._module_status[module_name] = True
-            return result
-        except asyncio.TimeoutError:
-            logger.error("Module %s timed out after %.1fs", module_name, timeout)
-            self._module_status[module_name] = False
-            if task is not None and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
-        except asyncio.CancelledError:
-            logger.warning("Module %s was cancelled", module_name)
-            self._module_status[module_name] = False
-            raise
-        except Exception as e:
-            logger.error("Module %s error: %s", module_name, e, exc_info=True)
-            self._module_status[module_name] = False
-        return None
-
-    def _arbitrate_signals(self, raw_signals: List[Order], context: dict, portfolio: dict) -> List[Order]:
-        if not raw_signals:
-            return []
-
-        priority_map: Dict[str, int] = {name: idx for idx, name in enumerate(self.signal_priority)}
-
-        def _priority_key(o: Order) -> int:
-            mod = ''
-            if hasattr(o, 'metadata') and isinstance(o.metadata, dict):
-                mod = o.metadata.get('module', '') or ''
-            key = MODULE_TO_PRIORITY_KEY.get(mod, mod)
-            return priority_map.get(key, 999)
-
-        raw_signals = sorted(raw_signals, key=_priority_key)
-
-        close_all = [
-            o for o in raw_signals
-            if getattr(o, 'action', None) in ('CLOSE_ALL', 'PANIC')
+        # 自定义脱敏规则
+        self._sanitize_rules: List[Callable[[str], str]] = [
+            lambda s: s.replace(str(getattr(self.config, 'api_keys', '')), '***'),
         ]
-        if close_all:
-            return close_all[:1]
 
+    def _refresh_config(self):
+        """刷新内部配置快照"""
+        dm_cfg = getattr(self.config, 'decision_maker', None) or {}
+        self._max_signals_per_iter = getattr(dm_cfg, 'max_signals_per_iter', DEFAULT_MAX_SIGNALS)
+        self._max_modules = getattr(dm_cfg, 'max_modules', DEFAULT_MAX_MODULES)
+        self._audit_enabled = getattr(self.config, 'audit', {}).get('enabled', False)
+        self._sanitize_logs = getattr(dm_cfg, 'sanitize_logs', True)
+        self._module_compute_timeout = getattr(dm_cfg, 'module_compute_timeout', MODULE_COMPUTE_TIMEOUT_SEC)
+        self._decision_timeout = getattr(dm_cfg, 'decision_timeout', DECISION_TIMEOUT_SEC)
+
+    # -------------------------------------------------------------------------
+    # 主决策入口（受总超时保护）
+    # -------------------------------------------------------------------------
+    async def decide(self, kline: Kline, base_context: dict) -> List[Order]:
+        batch_id = uuid.uuid4().hex[:8]
+        start_time = time.monotonic()
         orders: List[Order] = []
-        seen_open: Set[Tuple[str, str]] = set()
 
-        for signal in raw_signals:
-            action = getattr(signal, 'action', None)
-            if action in ('CLOSE', 'REDUCE', 'CLOSE_ALL', 'REDUCE_50', 'PANIC'):
-                orders.append(signal)
-                continue
-
-            module = 'unknown'
-            if hasattr(signal, 'metadata') and isinstance(signal.metadata, dict):
-                module = signal.metadata.get('module', 'unknown') or 'unknown'
-            direction = getattr(signal, 'direction', None) or 'LONG'
-            key = (module, direction)
-            if key in seen_open:
-                continue
-            seen_open.add(key)
-            orders.append(signal)
-
-        open_orders = [o for o in orders if getattr(o, 'action', None) in ('OPEN', 'ADD')]
-        if open_orders:
-            directions = {getattr(o, 'direction', None) for o in open_orders}
-            if len(directions) > 1:
-                first_dir = getattr(open_orders[0], 'direction', None)
-                logger.warning("Arbitration: conflicting directions, keeping %s", first_dir)
-                orders = [
-                    o for o in orders
-                    if getattr(o, 'action', None) not in ('OPEN', 'ADD')
-                    or getattr(o, 'direction', None) == first_dir
-                ]
-
+        try:
+            # 使用 asyncio.wait_for 实现整个决策流程的超时熔断
+            orders = await asyncio.wait_for(
+                self._decide_impl(kline, base_context, batch_id),
+                timeout=self._decision_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Decision batch {batch_id} timed out after {self._decision_timeout}s")
+            if self.metrics:
+                self.metrics.record_decision_timeout()
+        except Exception as e:
+            logger.critical(f"Decision batch {batch_id} failed: {e}", exc_info=True)
+        finally:
+            elapsed = time.monotonic() - start_time
+            logger.debug(f"Decision batch {batch_id} completed in {elapsed:.4f}s, orders: {len(orders)}")
+            if self.metrics:
+                self.metrics.record_decision_latency(elapsed)
         return orders
 
-    async def _process_escape(self, kline, context, portfolio):
-        module = self._get_module('EscapeDetector')
-        if not module:
-            return None
-        try:
-            features = context.get('features', {}) or {}
-            escape_signal = await module.evaluate(features, context)
-            action = getattr(escape_signal, 'action', None) if escape_signal else None
-            if escape_signal and action in ('REDUCE_50', 'CLOSE_ALL', 'REDUCE', 'CLOSE', 'PANIC'):
-                pos_dir = context.get('current_position_direction')
-                if not pos_dir:
-                    logger.info("Escape signal ignored: no position")
-                    return None
-                close_direction = 'SHORT' if pos_dir == 'LONG' else 'LONG'
-                if action == 'REDUCE_50':
-                    action = 'REDUCE'
-                # 区分 close / reduce 优先级
-                meta_module = 'escape_reduce' if action == 'REDUCE' else 'escape'
-                order = Order(
-                    symbol=context.get('symbol', 'BTCUSDT'),
-                    action=action,
-                    direction=close_direction,
-                    order_type='MARKET',
-                    price=float(context.get('last_price', 0.0) or 0.0),
-                    size=0.0,
-                    metadata={'module': meta_module, 'reason': 'stage_top'}
-                )
-                return order
-        except Exception as e:
-            logger.error("Escape processing failed: %s", e)
-            self._module_status['EscapeDetector'] = False
-        return None
+    async def _decide_impl(self, kline, base_context, batch_id) -> List[Order]:
+        orders = []
+        if not self._can_trade():
+            logger.debug(f"Batch {batch_id}: trading restricted")
 
-    async def _process_recapture(self, kline, context, portfolio):
-        module = self._get_module('Recapture')
-        if not module:
-            return None
-        try:
-            order = await module.evaluate(
-                context.get('symbol', 'BTCUSDT'), kline,
-                context.get('features', {}) or {}, context, portfolio
-            )
-            if order:
-                if not hasattr(order, 'metadata') or order.metadata is None:
-                    order.metadata = {}
-                order.metadata['module'] = 'recapture'
-                return order
-        except Exception as e:
-            logger.error("Recapture processing failed: %s", e)
-            self._module_status['Recapture'] = False
-        return None
+        # 构建上下文
+        context = await self._build_context_with_retry(kline, base_context, batch_id)
+        if context is None:
+            logger.error(f"Batch {batch_id}: context build failed, aborting")
+            return orders
 
-    async def _process_callback_drop(self, kline, context, portfolio):
-        module = self._get_module('CallbackDrop')
-        if not module:
-            return None
-        try:
-            order = await module.evaluate(
-                context.get('symbol', 'BTCUSDT'), kline,
-                context.get('features', {}) or {}, context, portfolio
-            )
-            if order:
-                if not hasattr(order, 'metadata') or order.metadata is None:
-                    order.metadata = {}
-                order.metadata['module'] = 'callback_drop'
-                return order
-        except Exception as e:
-            logger.error("CallbackDrop processing failed: %s", e)
-            self._module_status['CallbackDrop'] = False
-        return None
+        # 收集信号（带超时和模块隔离）
+        raw_signals = await self._collect_signals(kline, context, batch_id)
 
-    async def _process_pullback_add(self, kline, context, portfolio):
-        module = self._get_module('PullbackAdd')
-        if not module:
-            return None
-        try:
-            order = await module.evaluate(
-                context.get('symbol', 'BTCUSDT'), kline,
-                context.get('features', {}) or {}, context, portfolio
-            )
-            if order:
-                if not hasattr(order, 'metadata') or order.metadata is None:
-                    order.metadata = {}
-                order.metadata['module'] = 'pullback_add'
-                return order
-        except Exception as e:
-            logger.error("PullbackAdd processing failed: %s", e)
-            self._module_status['PullbackAdd'] = False
-        return None
+        # 信号装配
+        assembled = self.signal_assembler.assemble(raw_signals, context, batch_id)
 
-    async def _process_guerrilla_chase(self, kline, context, portfolio):
-        module = self._get_module('GuerrillaChase')
-        if not module:
-            return None
-        try:
-            order = await module.evaluate(kline, context)
-            if order:
-                if not hasattr(order, 'metadata') or order.metadata is None:
-                    order.metadata = {}
-                order.metadata['module'] = 'guerrilla_chase'
-                return order
-        except Exception as e:
-            logger.error("GuerrillaChase processing failed: %s", e)
-            self._module_status['GuerrillaChase'] = False
-        return None
+        # 共振
+        resonance = await self._evaluate_resonance(context, batch_id)
+        assembled = self._apply_resonance(assembled, resonance)
 
-    async def _process_trend_prob_filter(self, kline, context, portfolio):
-        module = self._get_module('TrendProbabilityFilter')
-        if not module:
-            return None
-        try:
-            prob_data = await module.compute(kline, context)
-            if (prob_data
-                    and float(prob_data.get('trend_probability', 0.0) or 0.0) > 0.7
-                    and not bool(prob_data.get('is_chaotic', True))):
-                direction = prob_data.get('direction', 'LONG') or 'LONG'
-                order = Order(
-                    symbol=context.get('symbol', 'BTCUSDT'),
-                    action='OPEN',
-                    direction=direction,
-                    order_type='MARKET',
-                    price=float(context.get('last_price', 0.0) or 0.0),
-                    size=0.0,
-                    metadata={'module': 'trend_prob_filter'}
-                )
-                return order
-        except Exception as e:
-            logger.error("TrendProbFilter processing failed: %s", e)
-            self._module_status['TrendProbabilityFilter'] = False
-        return None
+        # 优先级
+        final_signals = self.priority_executor.resolve_all(assembled, resonance, batch_id)
 
-    def _apply_risk_and_sizing(self, orders: List[Order], portfolio: Union[dict, None], symbol: str) -> List[Order]:
-        sizer = self._position_sizer() if self._position_sizer else None
-        firewall = self._risk_firewall() if self._risk_firewall else None
+        # 限制过滤
+        final_signals = self._apply_trading_restrictions(final_signals, batch_id)
 
-        if not sizer or not firewall:
-            logger.error("Position sizer or firewall not initialized or GC'd")
-            self._module_status['PositionSizer'] = False
-            self._module_status['RiskFirewall'] = False
-            return []
+        # 风控审批
+        orders = await self._approve_and_generate_orders(final_signals, context, batch_id)
+        return orders
 
-        if not isinstance(portfolio, dict):
-            portfolio = {}
-
-        final_orders: List[Order] = []
-        try:
-            equity = float(portfolio.get('total_equity', 0.0) or 0.0)
-        except (TypeError, ValueError):
-            equity = 0.0
-        if equity <= FLOAT_TOLERANCE:
-            logger.error("Invalid portfolio equity: %s", equity)
-            return []
-
-        for order in orders:
+    # -------------------------------------------------------------------------
+    # 上下文构建（带批次追踪）
+    # -------------------------------------------------------------------------
+    async def _build_context_with_retry(self, kline, base_context, batch_id, max_retries=CONTEXT_BUILD_MAX_RETRIES):
+        for attempt in range(max_retries + 1):
             try:
-                price = float(getattr(order, 'price', 0.0) or 0.0)
-                if price <= FLOAT_TOLERANCE:
-                    price = float(portfolio.get('last_price', 0.0) or 0.0)
-                if price <= FLOAT_TOLERANCE:
-                    logger.warning("Invalid order price, skipping")
-                    continue
-
-                action = getattr(order, 'action', None)
-                if action in ('CLOSE', 'REDUCE', 'CLOSE_ALL', 'REDUCE_50', 'PANIC'):
-                    if firewall.check(order, portfolio):
-                        final_orders.append(order)
-                    else:
-                        mod = (getattr(order, 'metadata', None) or {}).get('module', 'unknown')
-                        logger.warning("Close order rejected by firewall: %s", mod)
-                    continue
-
-                qty = float(sizer.calculate(equity, price, symbol) or 0.0)
-                if qty <= FLOAT_TOLERANCE:
-                    logger.info("Order skipped due to zero quantity (min notional)")
-                    continue
-                order.size = qty
-
-                if firewall.check(order, portfolio):
-                    final_orders.append(order)
-                else:
-                    mod = (getattr(order, 'metadata', None) or {}).get('module', 'unknown')
-                    logger.warning("Order rejected by firewall: %s", mod)
-            except Exception as e:
-                mod = (getattr(order, 'metadata', None) or {}).get('module', 'unknown')
-                logger.error("Position sizing/firewall error for order %s: %s", mod, e)
-                self._module_status['PositionSizer'] = False
-                self._module_status['RiskFirewall'] = False
-        return final_orders
-
-    def _log_decision(self, kline, context, orders):
-        if not orders:
-            return
-        try:
-            snap = {
-                'price': round(float(context.get('last_price', 0.0) or 0.0), 2),
-                'kma': round(float(context.get('kma', 0.0) or 0.0), 2),
-                'atr': round(float(context.get('atr_3m', 0.0) or 0.0), 2),
-                'pos_dir': self._current_position_direction,
-                'trend_prob': round(
-                    float((context.get('features') or {}).get('trend_probability', 0.0) or 0.0), 4
-                ),
-            }
-            for order in orders:
-                logger.info(
-                    "AUDIT: Order | sym=%s act=%s dir=%s sz=%.6f px=%.2f mod=%s snap=%s",
-                    getattr(order, 'symbol', '?'),
-                    getattr(order, 'action', '?'),
-                    getattr(order, 'direction', '?'),
-                    float(getattr(order, 'size', 0.0) or 0.0),
-                    float(getattr(order, 'price', 0.0) or 0.0),
-                    (getattr(order, 'metadata', None) or {}).get('module', 'unknown'),
-                    snap
+                context = await self.context_pipeline.enrich_context(
+                    tf=self.config.strategy.primary_interval,
+                    kline=kline,
+                    base_context=base_context,
                 )
+                if context is not None:
+                    context['decision_batch_id'] = batch_id
+                    return self._ensure_context_defaults(context)
+                logger.warning(f"Batch {batch_id}: context pipeline returned None (attempt {attempt+1})")
+            except Exception as e:
+                logger.warning(f"Batch {batch_id}: context build attempt {attempt+1} failed: {e}")
+                if attempt < max_retries:
+                    await asyncio.sleep(0.1)
+        # 回退上下文，填充必要默认值
+        fallback = dict(base_context)
+        fallback['decision_batch_id'] = batch_id
+        fallback['context_degraded'] = True
+        logger.warning(f"Batch {batch_id}: using degraded context")
+        return self._ensure_context_defaults(fallback)
+
+    def _ensure_context_defaults(self, ctx: dict) -> dict:
+        """确保上下文包含必要的字段，防止后续 KeyError"""
+        defaults = {
+            'kma': None,
+            'kma_slope': 0.0,
+            'atr_3m': 0.0,
+            'hmm_state_3m': 'UNKNOWN',
+            'bpi': 0.0,
+            'takerflow': 0.0,
+            'resonance': ResonanceState(strength=0.0),
+        }
+        for k, v in defaults.items():
+            if k not in ctx:
+                ctx[k] = v
+        return ctx
+
+    # -------------------------------------------------------------------------
+    # 信号收集（带批次追踪、超时、异步保护）
+    # -------------------------------------------------------------------------
+    async def _collect_signals(self, kline, context, batch_id) -> List[Signal]:
+        raw_signals = []
+        modules = copy.copy(self.signal_modules)
+        tasks = {}
+
+        for name, module in modules.items():
+            if not self._is_module_enabled(name):
+                continue
+            tasks[name] = asyncio.create_task(self._compute_module(name, module, kline, context, batch_id))
+
+        if not tasks:
+            return raw_signals
+
+        done, pending = await asyncio.wait(tasks.values(), timeout=self._module_compute_timeout)
+        # 取消超时未完成的任务
+        for task in pending:
+            task.cancel()
+            # 等待取消完成（忽略取消异常）
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        for name, task in tasks.items():
+            try:
+                if task in done:
+                    result = task.result()
+                    if isinstance(result, list):
+                        raw_signals.extend(result)
+                else:
+                    logger.warning(f"Batch {batch_id}: module {name} did not complete within timeout")
+                    self._handle_module_error(name)
+            except Exception as e:
+                logger.error(f"Batch {batch_id}: unexpected error from module {name}: {e}")
+                self._handle_module_error(name)
+
+        # 信号截断（优先保留平仓/减仓信号）
+        return self._truncate_signals(raw_signals, batch_id)
+
+    async def _compute_module(self, name, module, kline, context, batch_id):
+        try:
+            return await asyncio.wait_for(
+                module.compute(kline, context),
+                timeout=self._module_compute_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Batch {batch_id}: module {name} timed out")
+            return []
         except Exception as e:
-            logger.error("Audit log failed: %s", e)
+            logger.error(f"Batch {batch_id}: module {name} error: {e}")
+            return []
 
-    def _exceed_signal_limit_locked(self, now: float) -> bool:
-        cutoff = now - SIGNAL_WINDOW_SEC
-        while self._signal_timestamps and self._signal_timestamps[0] <= cutoff:
-            self._signal_timestamps.popleft()
-        return len(self._signal_timestamps) >= self.max_signals_per_hour
+    def _truncate_signals(self, raw_signals: List[Signal], batch_id) -> List[Signal]:
+        if len(raw_signals) <= self._max_signals_per_iter:
+            return raw_signals
+        open_signals = [s for s in raw_signals if s.action in (SignalAction.OPEN, SignalAction.ADD)]
+        close_signals = [s for s in raw_signals if s.action not in (SignalAction.OPEN, SignalAction.ADD)]
+        # 保留所有平仓信号，剩余名额给开仓（按优先级排序）
+        free_slots = self._max_signals_per_iter - len(close_signals)
+        if free_slots > 0:
+            # 开仓信号按优先级排序（例如共振、概率降序）
+            open_signals.sort(key=lambda s: s.probability * s.size_multiplier, reverse=True)
+            open_signals = open_signals[:free_slots]
+        else:
+            open_signals = []
+        truncated = close_signals + open_signals
+        logger.warning(f"Batch {batch_id}: signals truncated from {len(raw_signals)} to {len(truncated)}")
+        return truncated
 
-    def get_module_status(self) -> Dict[str, bool]:
-        return self._module_status.copy()
+    # -------------------------------------------------------------------------
+    # 共振
+    # -------------------------------------------------------------------------
+    async def _evaluate_resonance(self, context, batch_id) -> ResonanceState:
+        try:
+            state = await self.resonance_evaluator.evaluate(context)
+            return state if state else ResonanceState(strength=0.0)
+        except Exception:
+            logger.warning(f"Batch {batch_id}: resonance evaluation failed, using neutral")
+            return ResonanceState(strength=0.0)
 
-    def teardown(self):
-        """清理资源，优雅关闭时调用"""
-        self._in_cooldown = True
-        self._cooldown_until = float('inf')
-        self._signal_timestamps.clear()
-        self._recent_signals.clear()
-        self._last_decision_timestamp = None
-        logger.info("Decision maker teardown initiated")
+    def _apply_resonance(self, signals: List[Signal], resonance: ResonanceState) -> List[Signal]:
+        for sig in signals:
+            if sig.action in (SignalAction.OPEN, SignalAction.ADD):
+                multiplier = 1.0 + resonance.strength * 0.5
+                multiplier = max(RESONANCE_FLOOR, min(RESONANCE_CEIL, multiplier))
+                sig.size_multiplier *= multiplier
+        return signals
+
+    # -------------------------------------------------------------------------
+    # 限制过滤
+    # -------------------------------------------------------------------------
+    def _apply_trading_restrictions(self, signals: List[Signal], batch_id) -> List[Signal]:
+        filtered = []
+        for sig in signals:
+            if self._reduce_only_mode:
+                if sig.action in (SignalAction.CLOSE_ALL, SignalAction.REDUCE_50, SignalAction.STOP_LOSS):
+                    filtered.append(sig)
+                else:
+                    logger.debug(f"Batch {batch_id}: signal suppressed (reduce-only): {sig.action}")
+                continue
+            if not self._can_trade() and sig.action in (SignalAction.OPEN, SignalAction.ADD):
+                logger.debug(f"Batch {batch_id}: signal suppressed (cooldown): {sig.action}")
+                continue
+            filtered.append(sig)
+        return filtered
+
+    # -------------------------------------------------------------------------
+    # 风控审批
+    # -------------------------------------------------------------------------
+    async def _approve_and_generate_orders(self, signals: List[Signal], context, batch_id) -> List[Order]:
+        orders = []
+        for sig in signals:
+            if sig.action == SignalAction.NO_ACTION:
+                continue
+            order = sig.to_order(self.config.execution)
+            if order is None:
+                logger.warning(f"Batch {batch_id}: failed to create order from signal {sig}")
+                continue
+            order.tracking_id = f"{batch_id}-{sig.module}-{sig.action}"
+            try:
+                approved = await asyncio.wait_for(
+                    self.risk_bus.approve(order, context),
+                    timeout=RISK_BUS_TIMEOUT_SEC,
+                )
+                if approved is True:
+                    orders.append(order)
+                    self._log_decision(sig, order, batch_id)
+                else:
+                    logger.info(f"Batch {batch_id}: order rejected by risk bus")
+            except asyncio.TimeoutError:
+                logger.error(f"Batch {batch_id}: risk bus approval timeout for {order.tracking_id}")
+            except Exception as e:
+                logger.error(f"Batch {batch_id}: risk bus error: {e}", exc_info=True)
+        return orders
+
+    # -------------------------------------------------------------------------
+    # 日志与脱敏
+    # -------------------------------------------------------------------------
+    def _log_decision(self, signal: Signal, order: Order, batch_id):
+        if self._audit_enabled:
+            logger.info(f"AUDIT|{batch_id}|{signal.action}|{signal.direction}|qty={order.qty:.4f}")
+        else:
+            logger.debug(f"Decision|{batch_id}|{signal.summary()} -> {self._sanitize_order(order)}")
+
+    def _sanitize_order(self, order: Order) -> str:
+        if self._sanitize_logs:
+            base = f"Order({order.symbol} {order.side} qty={order.qty:.4f})"
+            for rule in self._sanitize_rules:
+                base = rule(base)
+            return base
+        return str(order)
+
+    def register_sanitize_rule(self, rule: Callable[[str], str]):
+        """注册自定义脱敏函数"""
+        self._sanitize_rules.append(rule)
+
+    # -------------------------------------------------------------------------
+    # 状态控制
+    # -------------------------------------------------------------------------
+    def _can_trade(self) -> bool:
+        if self._reduce_only_mode:
+            return False
+        if self._cooldown_until > 0 and time.monotonic() < self._cooldown_until:
+            return False
+        return True
+
+    def set_reduce_only(self, active: bool):
+        self._reduce_only_mode = active
+        logger.info(f"Reduce-only mode: {active}")
+
+    def set_cooldown(self, seconds: float):
+        self._cooldown_until = time.monotonic() + seconds
+        logger.info(f"Cooldown set for {seconds}s")
+
+    def _is_module_enabled(self, name: str) -> bool:
+        if name in self._disabled_modules:
+            return False
+        try:
+            mod_cfg = getattr(self.config.strategy, name, None)
+            return mod_cfg.get('enabled', True) if mod_cfg else True
+        except Exception:
+            return True
+
+    # -------------------------------------------------------------------------
+    # 热插拔与配置重载
+    # -------------------------------------------------------------------------
+    def add_module(self, name: str, module: FeatureComputer):
+        self.signal_modules[name] = module
+        logger.info(f"Module {name} added")
+
+    def remove_module(self, name: str):
+        self.signal_modules.pop(name, None)
+        self._disabled_modules.discard(name)
+        logger.info(f"Module {name} removed")
+
+    def register_config_change_callback(self, callback: Callable):
+        self._config_change_callback = callback
+
+    async def on_config_changed(self):
+        self._refresh_config()
+        self._module_errors.clear()
+        self._disabled_modules.clear()
+        logger.info("DecisionMaker config reloaded")
+        if self._config_change_callback:
+            await self._config_change_callback()
+
+    def health_status(self) -> dict:
+        return {
+            "reduce_only": self._reduce_only_mode,
+            "cooldown_remaining": max(0, self._cooldown_until - time.monotonic()),
+            "active_modules": [m for m in self.signal_modules if self._is_module_enabled(m)],
+            "disabled_modules": list(self._disabled_modules),
+            "module_errors": dict(self._module_errors),
+          }
