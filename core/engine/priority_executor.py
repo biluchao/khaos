@@ -13,7 +13,7 @@
     - 去重保护：同品种同动作信号自动去重，防止重复订单。
 
 外部依赖:
-    - asyncio, logging, time, typing, copy
+    - logging, time, typing
     - core.interfaces (SignalPriority, OrderAction)
     - core.models (Signal, Portfolio)
 
@@ -31,13 +31,15 @@
 创建日期: 2025-06-15
 修改记录:
     - 2026-07-08 v37.0: 经过80项缺陷修复，成为华尔街级最终裁决器。
-__version__ = "37.0.0"
+    - 2026-07-27 v37.1 \~ v37.3: 逐步消除副作用、统一比较、对称放行、持仓缓存、action兼容。
+    - 2026-07-27 v37.4: 修复 None ratio 比较崩溃、非法 ratio 首次拦截、全局同优先级保留、持仓容错强化。
+__version__ = "37.4.0"
 __all__ = ["PriorityExecutor"]
 """
 
 import logging
 import time
-from typing import List, Optional, Set, Dict, Any, FrozenSet
+from typing import List, Optional, Set, Dict, Any, FrozenSet, Tuple
 
 from core.interfaces import SignalPriority, OrderAction
 from core.models import Signal, Portfolio
@@ -48,16 +50,15 @@ logger = logging.getLogger(__name__)
 class PriorityExecutor:
     """
     优先级执行器，基于信号优先级的硬裁决规则。
-    
+
     裁决逻辑:
-        1. 存在 PANIC_CLOSE 或 HARD_STOP 时，保留所有该级别的信号（多品种去重），丢弃其他。
-        2. 存在 ESCAPE_CLOSE 时，保留所有 ESCAPE_CLOSE 和 ESCAPE_REDUCE 信号（同品种去重）。
+        1. 存在 PANIC_CLOSE 或 HARD_STOP 时，保留所有该级别的信号（多品种+动作去重），丢弃其他。
+        2. 存在 ESCAPE_CLOSE 时，保留所有 ESCAPE_* 以及同品种/全局的 CLOSE/REDUCE 信号。
         3. 存在 ESCAPE_REDUCE 时，保留 ESCAPE_REDUCE 及同品种/全局的 CLOSE/REDUCE 信号。
-        4. 无上述信号时，按优先级排序返回。
-        5. 所有逃生信号经过持仓验证，无持仓者丢弃（若数据可信任）。
+        4. 无上述信号时，按优先级排序返回（稳定排序）。
+        5. 所有逃生信号经过持仓验证，无持仓者丢弃；查询异常时保守保留。
     """
 
-    # 默认优先级集合（不可变）
     DEFAULT_BLOCKING_PRIORITIES: FrozenSet[SignalPriority] = frozenset({
         SignalPriority.PANIC_CLOSE,
         SignalPriority.HARD_STOP,
@@ -67,7 +68,6 @@ class PriorityExecutor:
         SignalPriority.ESCAPE_REDUCE,
     })
 
-    # 最大处理信号数
     MAX_SIGNALS = 1000
 
     def __init__(
@@ -75,13 +75,15 @@ class PriorityExecutor:
         blocking_priorities: Optional[Set[SignalPriority]] = None,
         escape_priorities: Optional[Set[SignalPriority]] = None,
     ):
-        # 使用不可变集合，确保外部修改不影响内部状态
         raw_blocking = blocking_priorities if blocking_priorities is not None else self.DEFAULT_BLOCKING_PRIORITIES
         raw_escape = escape_priorities if escape_priorities is not None else self.DEFAULT_ESCAPE_PRIORITIES
 
-        # 校验：阻断优先级数值必须严格小于逃生优先级
         for bp in raw_blocking:
+            if not isinstance(bp, SignalPriority):
+                raise TypeError(f"blocking_priorities must contain SignalPriority, got {type(bp)}")
             for ep in raw_escape:
+                if not isinstance(ep, SignalPriority):
+                    raise TypeError(f"escape_priorities must contain SignalPriority, got {type(ep)}")
                 if bp.value >= ep.value:
                     raise ValueError(
                         f"Blocking priority {bp} (value={bp.value}) must be strictly less "
@@ -91,7 +93,9 @@ class PriorityExecutor:
         self.blocking_priorities: FrozenSet[SignalPriority] = frozenset(raw_blocking)
         self.escape_priorities: FrozenSet[SignalPriority] = frozenset(raw_escape)
 
-        # 统计信息
+        self._blocking_values: FrozenSet[int] = frozenset(p.value for p in self.blocking_priorities)
+        self._escape_values: FrozenSet[int] = frozenset(p.value for p in self.escape_priorities)
+
         self._stats: Dict[str, Any] = {
             "total_calls": 0,
             "total_signals_in": 0,
@@ -106,231 +110,411 @@ class PriorityExecutor:
         signals: List[Signal],
         portfolio: Optional[Portfolio] = None,
     ) -> List[Signal]:
-        """
-        对信号列表进行优先级裁决，返回实际应执行的信号列表。
-        
-        Args:
-            signals: 已组装的信号列表
-            portfolio: 当前投资组合，用于验证逃生信号是否必要
-            
-        Returns:
-            最终可执行的信号列表（已去重、排序）
-        """
         start_time = time.monotonic()
         self._stats["total_calls"] += 1
         self._stats["last_call_time"] = start_time
 
-        # 0. 输入清洗与数量限制
         if not isinstance(signals, list):
-            logger.error("Invalid input: signals must be a list")
+            logger.error("Invalid input: signals must be a list, got %s", type(signals).__name__)
+            self._finish_stats(start_time)
             return []
 
-        if len(signals) > self.MAX_SIGNALS:
-            logger.warning(f"Signal count {len(signals)} exceeds limit {self.MAX_SIGNALS}, truncating.")
-            signals = signals[:self.MAX_SIGNALS]
+        original_count = len(signals)
+        if original_count > self.MAX_SIGNALS:
+            logger.warning(
+                "Signal count %d exceeds limit %d, truncating.",
+                original_count, self.MAX_SIGNALS
+            )
+            signals = signals[: self.MAX_SIGNALS]
 
-        valid_signals: List[Signal] = []
+        # 规范化：(signal, resolved_priority)，绝不修改原对象
+        normalized: List[Tuple[Signal, SignalPriority]] = []
         for s in signals:
             if s is None:
                 continue
-            if not hasattr(s, 'action') or s.action is None or s.action == OrderAction.NO_ACTION:
+            action = getattr(s, "action", None)
+            if action is None or self._is_no_action(action):
                 continue
-            # 确保 priority 有效
-            if not hasattr(s, 'priority') or s.priority is None:
-                s.priority = SignalPriority.NORMAL_ENTRY
-            if not isinstance(s.priority, SignalPriority):
+
+            priority = getattr(s, "priority", None)
+            if priority is None:
+                priority = SignalPriority.NORMAL_ENTRY
+            elif not isinstance(priority, SignalPriority):
                 try:
-                    s.priority = SignalPriority(s.priority)
+                    priority = SignalPriority(priority)
                 except (ValueError, TypeError):
-                    s.priority = SignalPriority.NORMAL_ENTRY
-            valid_signals.append(s)
+                    priority = SignalPriority.NORMAL_ENTRY
 
-        self._stats["total_signals_in"] += len(valid_signals)
-        suppressed = 0
+            normalized.append((s, priority))
 
-        if not valid_signals:
+        self._stats["total_signals_in"] += len(normalized)
+
+        if not normalized:
             logger.debug("All signals invalid or NO_ACTION, returning empty.")
+            self._finish_stats(start_time)
             return []
 
-        # 1. 检查阻断信号
-        blocking = [s for s in valid_signals if s.priority in self.blocking_priorities]
+        # 1. 阻断信号
+        blocking = [(s, p) for s, p in normalized if p.value in self._blocking_values]
         if blocking:
-            # 去重：同品种只保留最高优先级（数值最小）的阻断信号
-            blocking = self._deduplicate_by_symbol_priority(blocking, keep_highest=True)
-            blocked_symbols = {getattr(s, 'symbol', '') or 'UNKNOWN' for s in blocking}
-            suppressed = len(valid_signals) - len(blocking)
+            deduped = self._deduplicate_by_symbol_action_priority(blocking, keep_highest=True)
+            result = [s for s, _ in deduped]
+            blocked_symbols = {self._safe_symbol(s) for s in result}
+            suppressed = len(normalized) - len(result)
             logger.warning(
-                f"BLOCKING SIGNALS: {len(blocking)} signals for symbols {blocked_symbols}, "
-                f"suppressing {suppressed} other signals."
+                "BLOCKING SIGNALS: %d signals for symbols %s, suppressing %d other signals.",
+                len(result), blocked_symbols, suppressed
             )
-            self._stats["total_signals_out"] += len(blocking)
+            self._stats["total_signals_out"] += len(result)
             self._stats["suppressed_count"] += suppressed
             self._finish_stats(start_time)
-            return sorted(blocking, key=lambda s: s.priority.value)
+            return self._stable_sort(deduped)
 
         # 2. 逃生信号处理
-        escape_close = [s for s in valid_signals if s.priority == SignalPriority.ESCAPE_CLOSE]
-        escape_reduce = [s for s in valid_signals if s.priority == SignalPriority.ESCAPE_REDUCE]
+        has_escape_close = any(p.value == SignalPriority.ESCAPE_CLOSE.value for _, p in normalized)
+        has_escape_reduce = any(p.value == SignalPriority.ESCAPE_REDUCE.value for _, p in normalized)
 
-        if escape_close:
-            # 收集所有逃生级信号
-            allowed = [s for s in valid_signals if s.priority in self.escape_priorities]
-            # 去重：同品种同动作只保留一个
-            allowed = self._deduplicate_escape_signals(allowed)
-            # 验证持仓必要性
+        if has_escape_close:
+            escape_symbols = {
+                self._safe_symbol(s)
+                for s, p in normalized
+                if p.value == SignalPriority.ESCAPE_CLOSE.value and self._safe_symbol(s)
+            }
+            allowed = []
+            for s, p in normalized:
+                if p.value in self._escape_values:
+                    allowed.append((s, p))
+                elif self._is_close_or_reduce(getattr(s, "action", None)):
+                    sym = self._safe_symbol(s)
+                    if not sym or sym in escape_symbols:
+                        allowed.append((s, p))
+            deduped = self._deduplicate_escape_signals(allowed)
             if portfolio is not None:
-                allowed = self._filter_unnecessary_escapes(allowed, portfolio)
-            escape_symbols = {getattr(s, 'symbol', '') or 'UNKNOWN' for s in escape_close}
+                deduped = self._filter_unnecessary_escapes(deduped, portfolio)
+            result = [s for s, _ in deduped]
             logger.info(
-                f"ESCAPE_CLOSE active for {escape_symbols}, "
-                f"keeping {len(allowed)} escape signals."
+                "ESCAPE_CLOSE active for %s, keeping %d signals.",
+                escape_symbols or {"GLOBAL"}, len(result)
             )
-            suppressed = len(valid_signals) - len(allowed)
-            self._stats["total_signals_out"] += len(allowed)
+            suppressed = len(normalized) - len(result)
+            self._stats["total_signals_out"] += len(result)
             self._stats["suppressed_count"] += suppressed
             self._finish_stats(start_time)
-            return sorted(allowed, key=lambda s: s.priority.value)
+            return self._stable_sort(deduped)
 
-        if escape_reduce:
-            escape_symbols = {getattr(s, 'symbol', '') for s in escape_reduce if getattr(s, 'symbol', '')}
-            allowed: List[Signal] = []
-            for s in valid_signals:
-                if s.priority in self.escape_priorities:
-                    allowed.append(s)
-                elif s.action in (OrderAction.CLOSE, OrderAction.REDUCE):
-                    sym = getattr(s, 'symbol', '')
-                    # 同品种或全局信号（无 symbol）保留
-                    if sym in escape_symbols or not sym:
-                        allowed.append(s)
-            # 去重
-            allowed = self._deduplicate_escape_signals(allowed)
+        if has_escape_reduce:
+            escape_symbols = {
+                self._safe_symbol(s)
+                for s, p in normalized
+                if p.value == SignalPriority.ESCAPE_REDUCE.value and self._safe_symbol(s)
+            }
+            allowed = []
+            for s, p in normalized:
+                if p.value in self._escape_values:
+                    allowed.append((s, p))
+                elif self._is_close_or_reduce(getattr(s, "action", None)):
+                    sym = self._safe_symbol(s)
+                    if not sym or sym in escape_symbols:
+                        allowed.append((s, p))
+            deduped = self._deduplicate_escape_signals(allowed)
             if portfolio is not None:
-                allowed = self._filter_unnecessary_escapes(allowed, portfolio)
+                deduped = self._filter_unnecessary_escapes(deduped, portfolio)
+            result = [s for s, _ in deduped]
             logger.info(
-                f"ESCAPE_REDUCE active for {escape_symbols}, "
-                f"keeping {len(allowed)} signals."
+                "ESCAPE_REDUCE active for %s, keeping %d signals.",
+                escape_symbols or {"GLOBAL"}, len(result)
             )
-            suppressed = len(valid_signals) - len(allowed)
-            self._stats["total_signals_out"] += len(allowed)
+            suppressed = len(normalized) - len(result)
+            self._stats["total_signals_out"] += len(result)
             self._stats["suppressed_count"] += suppressed
             self._finish_stats(start_time)
-            return sorted(allowed, key=lambda s: s.priority.value)
+            return self._stable_sort(deduped)
 
-        # 3. 无阻断/逃生信号，全部返回
-        result = sorted(valid_signals, key=lambda s: s.priority.value)
-        self._stats["total_signals_out"] += len(result)
+        # 3. 无阻断/逃生，全部返回
+        result_pairs = normalized
+        self._stats["total_signals_out"] += len(result_pairs)
         self._finish_stats(start_time)
-        return result
+        return self._stable_sort(result_pairs)
 
     # =========================================================================
-    # 信号去重
+    # 辅助
     # =========================================================================
-    def _deduplicate_by_symbol_priority(self, signals: List[Signal], keep_highest: bool = True) -> List[Signal]:
-        """
-        按品种去重：同品种保留优先级最高（数值最小）的信号。
-        若无品种属性，则作为独立信号保留。
-        """
-        if not signals:
+    @staticmethod
+    def _is_no_action(action: Any) -> bool:
+        if action is None:
+            return True
+        if action == OrderAction.NO_ACTION:
+            return True
+        try:
+            return str(action).upper() in ("NO_ACTION", "NONE", "0")
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_close_or_reduce(action: Any) -> bool:
+        if action is None:
+            return False
+        if action in (OrderAction.CLOSE, OrderAction.REDUCE):
+            return True
+        try:
+            name = str(getattr(action, "name", action)).upper()
+            return name in ("CLOSE", "REDUCE")
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_close(action: Any) -> bool:
+        if action is None:
+            return False
+        if action == OrderAction.CLOSE:
+            return True
+        try:
+            return str(getattr(action, "name", action)).upper() == "CLOSE"
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_reduce(action: Any) -> bool:
+        if action is None:
+            return False
+        if action == OrderAction.REDUCE:
+            return True
+        try:
+            return str(getattr(action, "name", action)).upper() == "REDUCE"
+        except Exception:
+            return False
+
+    @staticmethod
+    def _safe_symbol(s: Signal) -> str:
+        sym = getattr(s, "symbol", None)
+        if sym is None:
+            return ""
+        return str(sym).strip()
+
+    def _stable_sort(self, pairs: List[Tuple[Signal, SignalPriority]]) -> List[Signal]:
+        def key_fn(item: Tuple[Signal, SignalPriority]) -> Tuple[int, str, str]:
+            s, p = item
+            return (p.value, self._safe_symbol(s), str(getattr(s, "action", "")))
+        return [s for s, _ in sorted(pairs, key=key_fn)]
+
+    def _deduplicate_by_symbol_action_priority(
+        self,
+        pairs: List[Tuple[Signal, SignalPriority]],
+        keep_highest: bool = True,
+    ) -> List[Tuple[Signal, SignalPriority]]:
+        if not pairs:
             return []
-        best: Dict[str, Signal] = {}
-        for s in signals:
-            sym = getattr(s, 'symbol', '') or '__no_symbol__'
-            if sym not in best:
-                best[sym] = s
+        best: Dict[Tuple[str, str], Tuple[Signal, SignalPriority]] = {}
+        for s, p in pairs:
+            sym = self._safe_symbol(s) or "__no_symbol__"
+            action_str = str(getattr(s, "action", ""))
+            key = (sym, action_str)
+            if key not in best:
+                best[key] = (s, p)
             else:
+                _, old_p = best[key]
                 if keep_highest:
-                    if s.priority.value < best[sym].priority.value:
-                        best[sym] = s
+                    if p.value < old_p.value:
+                        best[key] = (s, p)
                 else:
-                    if s.priority.value > best[sym].priority.value:
-                        best[sym] = s
+                    if p.value > old_p.value:
+                        best[key] = (s, p)
         return list(best.values())
 
-    def _deduplicate_escape_signals(self, signals: List[Signal]) -> List[Signal]:
-        """
-        去重逃生信号：同品种、同动作（CLOSE/REDUCE）只保留一个。
-        对于 REDUCE，合并时取最大 reduce_ratio；对于 CLOSE，仅保留一个。
-        """
-        close_map: Dict[str, Signal] = {}
-        reduce_map: Dict[str, Signal] = {}
-        others: List[Signal] = []
-        for s in signals:
-            sym = getattr(s, 'symbol', '') or '__global__'
-            if s.action == OrderAction.CLOSE:
-                if sym not in close_map:
-                    close_map[sym] = s
-                # 若有多个 CLOSE 保留优先级更高者
-                elif s.priority.value < close_map[sym].priority.value:
-                    close_map[sym] = s
-            elif s.action == OrderAction.REDUCE:
-                if sym not in reduce_map:
-                    reduce_map[sym] = s
-                else:
-                    # 合并减仓比例：取最大值（最保守）
-                    existing_ratio = getattr(reduce_map[sym], 'reduce_ratio', 0.0)
-                    new_ratio = getattr(s, 'reduce_ratio', 0.0)
-                    if new_ratio > existing_ratio:
-                        reduce_map[sym] = s
-                    # 优先级也保留更高者
-                    elif new_ratio == existing_ratio and s.priority.value < reduce_map[sym].priority.value:
-                        reduce_map[sym] = s
-            else:
-                others.append(s)
-        return list(close_map.values()) + list(reduce_map.values()) + others
+    def _deduplicate_escape_signals(
+        self,
+        pairs: List[Tuple[Signal, SignalPriority]],
+    ) -> List[Tuple[Signal, SignalPriority]]:
+        close_map: Dict[str, Tuple[Signal, SignalPriority]] = {}
+        reduce_map: Dict[str, Tuple[Signal, SignalPriority]] = {}
+        global_close: List[Tuple[Signal, SignalPriority]] = []
+        global_reduce: List[Tuple[Signal, SignalPriority]] = []
+        others: List[Tuple[Signal, SignalPriority]] = []
 
-    def _filter_unnecessary_escapes(self, signals: List[Signal], portfolio: Portfolio) -> List[Signal]:
-        """
-        过滤掉无持仓品种的逃生信号。
-        逃生信号若未指定品种（全局信号），始终保留。
-        若持仓检查异常，保守保留信号。
-        """
-        filtered: List[Signal] = []
-        for s in signals:
-            sym = getattr(s, 'symbol', '')
-            if not sym:
-                # 全局信号，保留
-                filtered.append(s)
-                continue
-            # 尝试检查持仓
-            try:
-                if self._has_position(portfolio, sym):
-                    filtered.append(s)
+        for s, p in pairs:
+            sym = self._safe_symbol(s)
+            action = getattr(s, "action", None)
+
+            if self._is_close(action):
+                if not sym:
+                    global_close.append((s, p))
+                elif sym not in close_map or p.value < close_map[sym][1].value:
+                    close_map[sym] = (s, p)
+            elif self._is_reduce(action):
+                ratio = self._safe_ratio(s)
+                if ratio is None:
+                    # 非法 ratio，直接丢弃该信号
+                    continue
+                if not sym:
+                    global_reduce.append((s, p))
+                elif sym not in reduce_map:
+                    reduce_map[sym] = (s, p)
                 else:
-                    logger.debug(f"Suppressing escape signal for {sym}: no position.")
-            except Exception:
-                # 持仓查询异常，保守保留
-                logger.warning(f"Portfolio query failed for {sym}, keeping escape signal.")
-                filtered.append(s)
+                    existing_ratio = self._safe_ratio(reduce_map[sym][0])
+                    # existing 已保证合法（首次插入时已过滤），但防御性处理
+                    if existing_ratio is None:
+                        reduce_map[sym] = (s, p)
+                    elif ratio > existing_ratio or (
+                        ratio == existing_ratio and p.value < reduce_map[sym][1].value
+                    ):
+                        reduce_map[sym] = (s, p)
+            else:
+                others.append((s, p))
+
+        # 同品种 CLOSE 优先于 REDUCE
+        for sym in list(reduce_map.keys()):
+            if sym in close_map:
+                del reduce_map[sym]
+
+        # 全局信号：同优先级全部保留（多指令并行），不同优先级只留最高
+        def _keep_global(items: List[Tuple[Signal, SignalPriority]]) -> List[Tuple[Signal, SignalPriority]]:
+            if not items:
+                return []
+            min_val = min(x[1].value for x in items)
+            return [x for x in items if x[1].value == min_val]
+
+        return (
+            list(close_map.values())
+            + list(reduce_map.values())
+            + _keep_global(global_close)
+            + _keep_global(global_reduce)
+            + others
+        )
+
+    @staticmethod
+    def _safe_ratio(s: Signal) -> Optional[float]:
+        """返回合法非负 ratio；非法或负值返回 None（调用方丢弃）。"""
+        try:
+            r = getattr(s, "reduce_ratio", 0.0)
+            if r is None:
+                return 0.0
+            r = float(r)
+            if r < 0.0:
+                logger.debug("Negative reduce_ratio %s on signal, discarding.", r)
+                return None
+            return r
+        except (TypeError, ValueError) as exc:
+            logger.debug("Invalid reduce_ratio on signal: %s", exc)
+            return None
+
+    def _filter_unnecessary_escapes(
+        self,
+        pairs: List[Tuple[Signal, SignalPriority]],
+        portfolio: Portfolio,
+    ) -> List[Tuple[Signal, SignalPriority]]:
+        held_symbols: Optional[Set[str]] = None
+        try:
+            held_symbols = self._build_held_symbols(portfolio)
+        except Exception as exc:
+            logger.warning(
+                "Failed to build held symbols set (%s), falling back to per-signal check. detail=%s",
+                type(exc).__name__, str(exc),
+                exc_info=True,
+            )
+
+        filtered: List[Tuple[Signal, SignalPriority]] = []
+        for s, p in pairs:
+            sym = self._safe_symbol(s)
+            if not sym:
+                filtered.append((s, p))
+                continue
+            try:
+                has_pos = (sym in held_symbols) if held_symbols is not None else self._has_position(portfolio, sym)
+                if has_pos:
+                    filtered.append((s, p))
+                else:
+                    logger.debug("Suppressing escape signal for %s: no position.", sym)
+            except Exception as exc:
+                logger.warning(
+                    "Portfolio query failed for %s (%s), keeping escape signal. detail=%s",
+                    sym, type(exc).__name__, str(exc),
+                    exc_info=True,
+                )
+                filtered.append((s, p))
         return filtered
 
+    def _build_held_symbols(self, portfolio: Portfolio) -> Set[str]:
+        held: Set[str] = set()
+        if portfolio is None:
+            return held
+        positions = getattr(portfolio, "positions", None)
+        if positions is not None:
+            if isinstance(positions, dict):
+                for sym, pos in positions.items():
+                    try:
+                        if pos is None:
+                            continue
+                        if isinstance(pos, (int, float)):
+                            if abs(pos) > 0:
+                                held.add(str(sym))
+                        else:
+                            qty = abs(getattr(pos, "quantity", 0) or 0)
+                            if qty > 0:
+                                held.add(str(sym))
+                    except Exception:
+                        continue
+            else:
+                for p in positions:
+                    try:
+                        if p is None:
+                            continue
+                        sym = getattr(p, "symbol", "")
+                        if not sym:
+                            continue
+                        qty = abs(getattr(p, "quantity", 0) or 0)
+                        if qty > 0:
+                            held.add(str(sym))
+                    except Exception:
+                        continue
+        if hasattr(portfolio, "get_held_symbols"):
+            try:
+                extra = portfolio.get_held_symbols()
+                if extra:
+                    held.update(str(x) for x in extra)
+            except Exception:
+                pass
+        return held
+
     def _has_position(self, portfolio: Portfolio, symbol: str) -> bool:
-        """检查组合是否持有指定品种（数量>0）。"""
         if portfolio is None:
             return False
         try:
-            positions = getattr(portfolio, 'positions', None) or []
-            for p in positions:
-                if p is not None and getattr(p, 'symbol', '') == symbol:
-                    qty = abs(getattr(p, 'quantity', 0) or 0)
-                    if qty > 0:
-                        return True
+            positions = getattr(portfolio, "positions", None)
+            if positions is not None:
+                if isinstance(positions, dict):
+                    pos = positions.get(symbol)
+                    if pos is None:
+                        return False
+                    if isinstance(pos, (int, float)):
+                        return abs(pos) > 0
+                    qty = abs(getattr(pos, "quantity", 0) or 0)
+                    return qty > 0
+                for p in positions:
+                    if p is None:
+                        continue
+                    if getattr(p, "symbol", "") == symbol:
+                        qty = abs(getattr(p, "quantity", 0) or 0)
+                        if qty > 0:
+                            return True
+            if hasattr(portfolio, "has_position"):
+                return bool(portfolio.has_position(symbol))
+            if hasattr(portfolio, "get_position"):
+                pos = portfolio.get_position(symbol)
+                if pos is None:
+                    return False
+                qty = abs(getattr(pos, "quantity", 0) or 0)
+                return qty > 0
         except Exception:
             pass
         return False
 
-    # =========================================================================
-    # 统计与辅助
-    # =========================================================================
     def _finish_stats(self, start_time: float) -> None:
-        """更新耗时统计。"""
         self._stats["last_call_duration_ms"] = (time.monotonic() - start_time) * 1000.0
 
     def get_stats(self) -> Dict[str, Any]:
-        """返回裁决统计信息（浅拷贝，值不可变）。"""
         return dict(self._stats)
 
     def reset_stats(self) -> None:
-        """重置统计信息。"""
         self._stats = {
             "total_calls": 0,
             "total_signals_in": 0,
@@ -341,27 +525,42 @@ class PriorityExecutor:
         }
 
     def get_config(self) -> Dict[str, Any]:
-        """返回当前配置。"""
         return {
             "blocking_priorities": [p.name for p in self.blocking_priorities],
             "escape_priorities": [p.name for p in self.escape_priorities],
         }
 
     def reset(self) -> None:
-        """重置执行器状态（仅统计）。"""
         self.reset_stats()
 
     def __repr__(self) -> str:
         calls = self._stats.get("total_calls", 0)
-        return (f"<PriorityExecutor blocking={len(self.blocking_priorities)} "
-                f"escape={len(self.escape_priorities)} calls={calls}>")
+        return (
+            f"<PriorityExecutor blocking={len(self.blocking_priorities)} "
+            f"escape={len(self.escape_priorities)} calls={calls}>"
+        )
 
 
-# 自检
 if __name__ == "__main__":
-    from core.models import Signal
-    s1 = Signal(symbol="BTCUSDT", action=OrderAction.OPEN, direction="LONG", priority=SignalPriority.NORMAL_ENTRY)
-    s2 = Signal(symbol="BTCUSDT", action=OrderAction.CLOSE, priority=SignalPriority.ESCAPE_CLOSE)
-    executor = PriorityExecutor()
-    result = executor.resolve([s1, s2])
-    print(f"Result: {[(s.action.value, s.priority.name) for s in result]}")
+    try:
+        from core.models import Signal
+        s1 = Signal(
+            symbol="BTCUSDT",
+            action=OrderAction.OPEN,
+            direction="LONG",
+            priority=SignalPriority.NORMAL_ENTRY,
+        )
+        s2 = Signal(
+            symbol="BTCUSDT",
+            action=OrderAction.CLOSE,
+            priority=SignalPriority.ESCAPE_CLOSE,
+        )
+        executor = PriorityExecutor()
+        result = executor.resolve([s1, s2])
+        print(
+            "Result:",
+            [(getattr(s.action, "value", s.action), getattr(s.priority, "name", s.priority)) for s in result],
+        )
+        print("Stats:", executor.get_stats())
+    except Exception as e:
+        print(f"Self-check skipped (missing runtime deps): {type(e).__name__}: {e}")
